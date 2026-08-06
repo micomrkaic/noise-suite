@@ -34,56 +34,49 @@
   canvas { width:100%; height:150px; background:#1e2026; border-radius:10px; display:block; }
   footer { font-size:11px; color:#667; margin-top:10px; text-align:center; }
 
-  #scene { width:100%; margin-bottom:12px; }
+  #scene { margin-bottom:12px; }
   #scene svg { width:100%; height:auto; display:block; }
-  .flame { transform-box:fill-box; transform-origin:50% 100%; }
-  .f1 { animation:flick 0.9s ease-in-out infinite; }
-  .f2 { animation:flick 1.3s ease-in-out infinite 0.2s; }
-  .f3 { animation:flick 0.7s ease-in-out infinite 0.4s; }
-  #glow { animation:glow 1.6s ease-in-out infinite; }
-  #catbody { transform-box:fill-box; transform-origin:50% 100%;
-             animation:breathe 3.6s ease-in-out infinite; }
-  .zz { opacity:0; animation:zfloat 4.2s ease-in infinite; }
-  .z2 { animation-delay:1.4s; } .z3 { animation-delay:2.8s; }
-  @keyframes flick { 0%,100% { transform:scaleY(1) skewX(0deg); }
-                     50% { transform:scaleY(1.18) skewX(3deg); } }
-  @keyframes glow  { 0%,100% { opacity:0.35; } 50% { opacity:0.6; } }
-  @keyframes breathe { 0%,100% { transform:scaleY(1); } 50% { transform:scaleY(1.045); } }
-  @keyframes zfloat { 0% { opacity:0; transform:translateY(0); }
-                      12% { opacity:0.9; }
-                      70% { opacity:0; transform:translateY(-26px); }
-                      100% { opacity:0; transform:translateY(-26px); } }
-  @media (prefers-reduced-motion: reduce) {
-    .flame, #glow, #catbody, .zz { animation:none; }
-    .zz { opacity:0.5; }
-  }
 </style>
 </head>
 <body>
-<h1>ZzzTop <span style="font-weight:400;color:#667">&mdash; sharp-dressed noise</span></h1>\n<div id="scene" aria-hidden="true"><svg viewBox="0 0 420 132" xmlns="http://www.w3.org/2000/svg">
-  <!-- floor -->
+<h1>ZzzTop <span style="font-weight:400;color:#667">&mdash; sharp-dressed noise</span></h1>
+<div id="scene" aria-hidden="true"><svg viewBox="0 0 420 132" xmlns="http://www.w3.org/2000/svg">
   <rect x="0" y="118" width="420" height="14" fill="#22242a"/>
   <!-- fireplace -->
   <rect x="38" y="26" width="150" height="94" rx="6" fill="#4a3a34"/>
   <rect x="38" y="26" width="150" height="10" rx="4" fill="#5a463e"/>
   <rect x="52" y="44" width="122" height="76" rx="4" fill="#0f1013"/>
-  <ellipse id="glow" cx="113" cy="112" rx="66" ry="34" fill="#ff8c3c" opacity="0.45"/>
-  <!-- logs -->
+  <ellipse cx="113" cy="112" rx="66" ry="34" fill="#ff8c3c" opacity="0.45">
+    <animate attributeName="opacity" values="0.35;0.6;0.35" dur="1.6s" repeatCount="indefinite"/>
+  </ellipse>
   <rect x="72" y="106" width="82" height="10" rx="5" fill="#5c4230" transform="rotate(-4 113 111)"/>
   <rect x="76" y="110" width="76" height="9" rx="4.5" fill="#4e3828" transform="rotate(5 114 114)"/>
-  <!-- flames -->
-  <path class="flame f1" d="M96 112 Q90 92 102 78 Q104 92 110 96 Q112 84 118 76 Q124 94 116 106 Q112 114 96 112 Z" fill="#e2571e"/>
-  <path class="flame f2" d="M108 112 Q104 96 114 82 Q116 94 122 98 Q126 88 130 82 Q136 100 126 110 Q118 116 108 112 Z" fill="#ff9d3c"/>
-  <path class="flame f3" d="M112 111 Q110 100 117 92 Q119 100 124 102 Q128 96 130 92 Q133 104 126 109 Q120 114 112 111 Z" fill="#ffd06b"/>
-  <!-- rug -->
+  <!-- flames: scale around each base via translate/scale/untranslate nesting -->
+  <g transform="translate(106 112)"><g>
+    <animateTransform attributeName="transform" type="scale" values="1 1;1 1.18;1 1" dur="0.9s" repeatCount="indefinite"/>
+    <g transform="translate(-106 -112)">
+      <path d="M96 112 Q90 92 102 78 Q104 92 110 96 Q112 84 118 76 Q124 94 116 106 Q112 114 96 112 Z" fill="#e2571e"/>
+    </g></g></g>
+  <g transform="translate(117 112)"><g>
+    <animateTransform attributeName="transform" type="scale" values="1 1;1 1.15;1 1" dur="1.3s" begin="0.2s" repeatCount="indefinite"/>
+    <g transform="translate(-117 -112)">
+      <path d="M108 112 Q104 96 114 82 Q116 94 122 98 Q126 88 130 82 Q136 100 126 110 Q118 116 108 112 Z" fill="#ff9d3c"/>
+    </g></g></g>
+  <g transform="translate(121 111)"><g>
+    <animateTransform attributeName="transform" type="scale" values="1 1;1 1.22;1 1" dur="0.7s" begin="0.4s" repeatCount="indefinite"/>
+    <g transform="translate(-121 -111)">
+      <path d="M112 111 Q110 100 117 92 Q119 100 124 102 Q128 96 130 92 Q133 104 126 109 Q120 114 112 111 Z" fill="#ffd06b"/>
+    </g></g></g>
+  <!-- rug + cat -->
   <ellipse cx="300" cy="120" rx="86" ry="10" fill="#3a2c34"/>
-  <!-- cat: tail, body, head -->
   <path d="M244 108 Q230 116 240 121 Q256 126 262 116" fill="none" stroke="#555a63" stroke-width="9" stroke-linecap="round"/>
-  <g id="catbody">
-    <ellipse cx="298" cy="99" rx="52" ry="26" fill="#555a63"/>
-    <ellipse cx="288" cy="106" rx="34" ry="15" fill="#606672"/>
-  </g>
-  <g id="cathead">
+  <g transform="translate(298 125)"><g>
+    <animateTransform attributeName="transform" type="scale" values="1 1;1 1.045;1 1" dur="3.6s" repeatCount="indefinite"/>
+    <g transform="translate(-298 -125)">
+      <ellipse cx="298" cy="99" rx="52" ry="26" fill="#555a63"/>
+      <ellipse cx="288" cy="106" rx="34" ry="15" fill="#606672"/>
+    </g></g></g>
+  <g>
     <circle cx="344" cy="88" r="20" fill="#555a63"/>
     <path d="M330 74 L327 60 L340 68 Z" fill="#555a63"/>
     <path d="M356 72 L362 59 L346 66 Z" fill="#555a63"/>
@@ -94,9 +87,18 @@
     <path d="M340 97 q4 3 8 0" fill="none" stroke="#3a3e46" stroke-width="2" stroke-linecap="round"/>
   </g>
   <g fill="#8b93a6" font-family="Georgia,serif" font-style="italic">
-    <text class="zz"    x="368" y="62" font-size="13">z</text>
-    <text class="zz z2" x="378" y="54" font-size="16">z</text>
-    <text class="zz z3" x="390" y="46" font-size="20">z</text>
+    <text x="368" y="62" font-size="13" opacity="0">z
+      <animate attributeName="opacity" values="0;0.9;0;0" dur="4.2s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 -26;0 -26" dur="4.2s" repeatCount="indefinite"/>
+    </text>
+    <text x="378" y="54" font-size="16" opacity="0">z
+      <animate attributeName="opacity" values="0;0.9;0;0" dur="4.2s" begin="1.4s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 -26;0 -26" dur="4.2s" begin="1.4s" repeatCount="indefinite"/>
+    </text>
+    <text x="390" y="46" font-size="20" opacity="0">z
+      <animate attributeName="opacity" values="0;0.9;0;0" dur="4.2s" begin="2.8s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 0;0 -26;0 -26" dur="4.2s" begin="2.8s" repeatCount="indefinite"/>
+    </text>
   </g>
 </svg></div>
 
