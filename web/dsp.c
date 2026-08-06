@@ -33,7 +33,7 @@ static double g_rate = 44100.0;
 
 /* ---- params ---- */
 static double params[12] = {
-    20000.0, 20000.0, 0.997, 0.997,
+    20000.0, 20000.0, 0.995, 0.997,
     60.0, 600.0, 1.6, 0.15,
     9.0, 3.0, 5500.0, 2.6,
 };
@@ -204,7 +204,10 @@ void dsp_render(int n)
 {
     if (n > BUF_N) n = BUF_N;
     for (int i = 0; i < n; i++) {
-        double s = gens[cur]();
+        /* 0.35 headroom: raw generator peaks (esp. brown/deep) exceed
+         * +-1, and this clamp sits BEFORE the volume gain in the web
+         * audio graph — without headroom they hard-clip audibly. */
+        double s = gens[cur]() * 0.35;
         if (s > 1.0) s = 1.0;
         if (s < -1.0) s = -1.0;
         outbuf[i] = (float)s;

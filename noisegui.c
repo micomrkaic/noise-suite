@@ -35,7 +35,7 @@ static param p_pink[] = {
     { "Low-pass tone (Hz)", 500, 20000, 20000, 20000, "%.0f" },
 };
 static param p_brown[] = {
-    { "Leak (tight <-> deep)", 0.9000, 0.9995, 0.997, 0.997, "%.4f" },
+    { "Leak (tight <-> deep)", 0.9000, 0.995, 0.995, 0.995, "%.4f" },
 };
 static param p_deep[] = {
     { "2nd-stage leak",      0.9000, 0.9995, 0.997, 0.997, "%.4f" },
@@ -311,7 +311,7 @@ static void spectrum_update(int playing)
 #define WIN_W 640
 #define WIN_H 640
 
-static const char *names[6] = { "White", "Pink", "Brown", "Deep", "Rain", "Sea" };
+static const char *names[6] = { "White", "Pink", "Brown", "Airplane", "Rain", "Sea" };
 static double (*gens[6])(void) = { white, pink, brown, deep, rain, sea };
 static const SDL_Color accents[6] = {
     { 200, 200, 200, 255 }, { 235, 140, 180, 255 }, { 170, 120, 70, 255 },
