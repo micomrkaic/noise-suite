@@ -1,6 +1,6 @@
-# noise-suite
+# noise-suite (ZzzTop)
 
-Sleep-sound synthesis in plain C: colored noise (white / pink / brown)
+ZzzTop: sleep-sound synthesis in plain C: colored noise (white / pink / brown)
 and procedural soundscapes (rain / sea), as both WAV generators and
 real-time players.
 
