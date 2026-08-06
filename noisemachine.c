@@ -2,7 +2,7 @@
  * Plays any of: white, pink, brown, rain, sea.
  *
  * Build:  cc -O2 -o noisemachine noisemachine.c $(sdl2-config --cflags --libs) -lm
- * Usage:  ./noisemachine white|pink|brown|rain|sea [volume 0..1]
+ * Usage:  ./noisemachine white|pink|brown|deep|rain|sea [volume 0..1]
  *         Ctrl-C to stop.
  */
 #include <SDL2/SDL.h>
@@ -48,6 +48,18 @@ static double brown(void)
     static double acc;
     acc = 0.997 * acc + 0.02 * white();
     return acc * 3.5;
+}
+
+/* 1/f^4 ("black"): brown through a second AR(1) stage, -12 dB/octave */
+static double deep(void)
+{
+    static double a1, a2;
+    const double p = 0.997;
+    a1 = p * a1 + white();
+    a2 = p * a2 + a1;
+    const double var = (1.0 + p * p) /
+                       ((1.0 - p * p) * (1.0 - p * p) * (1.0 - p * p)) / 3.0;
+    return a2 / sqrt(var) * 0.5;
 }
 
 /* ---------- rain ---------- */
@@ -153,12 +165,13 @@ static void audio_cb(void *userdata, Uint8 *stream, int len)
 int main(int argc, char **argv)
 {
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s white|pink|brown|rain|sea [volume 0..1]\n", argv[0]);
+        fprintf(stderr, "usage: %s white|pink|brown|deep|rain|sea [volume 0..1]\n", argv[0]);
         return 1;
     }
     gen = strcmp(argv[1], "white") == 0 ? white :
           strcmp(argv[1], "pink")  == 0 ? pink  :
           strcmp(argv[1], "brown") == 0 ? brown :
+          strcmp(argv[1], "deep")  == 0 ? deep  :
           strcmp(argv[1], "rain")  == 0 ? rain  :
           strcmp(argv[1], "sea")   == 0 ? sea   : NULL;
     if (!gen) { fprintf(stderr, "unknown sound '%s'\n", argv[1]); return 1; }

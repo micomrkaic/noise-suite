@@ -29,6 +29,7 @@ samples: noisegen soundscape
 	./noisegen white 30 samples/white.wav
 	./noisegen pink  30 samples/pink.wav
 	./noisegen brown 30 samples/brown.wav
+	./noisegen deep  30 samples/deep.wav
 	./soundscape rain 30 samples/rain.wav
 	./soundscape sea  30 samples/sea.wav
 

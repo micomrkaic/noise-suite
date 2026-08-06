@@ -8,9 +8,9 @@ real-time players.
 
 | Program        | Sounds                          | Output      | Dependencies    |
 |----------------|---------------------------------|-------------|-----------------|
-| `noisegen`     | white, pink, brown              | WAV file    | libm only       |
+| `noisegen`     | white, pink, brown, deep        | WAV file    | libm only       |
 | `soundscape`   | rain, sea                       | WAV file    | libm only       |
-| `noisemachine` | all five                        | real-time   | SDL2            |
+| `noisemachine` | all six                         | real-time   | SDL2            |
 | `noisesdl`     | white, pink, brown              | real-time   | SDL2            |
 | `noiselive`    | white, pink, brown              | real-time   | ALSA (Linux)    |
 
@@ -34,6 +34,18 @@ On macOS, `noisegen`, `soundscape`, and the SDL programs build as-is
     ./noisegen pink 3600 pink.wav   # one hour of pink noise to a file
     ./soundscape rain 600 rain.wav  # ten minutes of rain
 
+## Web / phone version (web/)
+
+`web/dsp.c` is the DSP core alone (own PRNG, runtime sample rate, no
+libc beyond libm) compiled to a zero-import WebAssembly module, with
+the UI as plain HTML/JS: native touch sliders, Web Audio output, and
+the browser's AnalyserNode for the live spectrum. `web/build.sh`
+(needs wasi-sdk) produces `noisemachine.html` — a single
+self-contained file with the wasm embedded base64. Copy it to a
+phone, open it, "add to home screen"; it works offline, over plain
+http, or from file://, because output uses ScriptProcessorNode rather
+than AudioWorklet (which requires a secure context).
+
 ## How the synthesis works
 
 **White** — uniform random samples: equal power at all frequencies.
@@ -45,6 +57,17 @@ the audio band. An exact 1/f slope has no finite IIR realization.
 **Brown** (−6 dB/octave) — leaky integration of white noise:
 `acc = 0.997*acc + 0.02*white()`. The 0.997 leak is a gentle
 high-pass that stops the random walk from drifting into clipping.
+The leak L maps to a corner frequency f = −ln(L)·RATE/2π: L=0.997
+is ~21 Hz (full rumble), L=0.99 ~70 Hz, L=0.90 ~740 Hz (tight,
+tending toward white as L falls further).
+
+**Deep** (−12 dB/octave, 1/f⁴, sometimes called "black" noise) —
+brown noise fed through a second AR(1) integrator: a two-pole
+cascade. Loudness is normalized analytically from the closed-form
+variance of the cascade, so the GUI leak slider doesn't double as a
+volume control. Nearly all its energy sits below ~100 Hz: expect
+silence on laptop speakers, a heavy earthquake-rumble on headphones
+or a subwoofer.
 
 **Rain** — a Poisson process (~60/s) of "drop" voices, each a burst of
 low-passed noise (300–1500 Hz) with a smooth 1–3 ms attack and an

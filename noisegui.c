@@ -1,7 +1,7 @@
 /* noisegui.c — sleep-sound machine with per-sound tuning controls.
  * Left: pick a sound. Right: live sliders for that sound's synthesis
  * parameters. Bottom: master volume, play/pause, VU meter.
- * Keys: 1-5 select sound, space play/pause, up/down volume, r resets
+ * Keys: 1-6 select sound, space play/pause, up/down volume, r resets
  * the selected sound's parameters, Esc quits.
  *
  * Build:  cc -O2 -o noisegui noisegui.c $(sdl2-config --cflags --libs) -lSDL2_ttf -lm
@@ -35,7 +35,10 @@ static param p_pink[] = {
     { "Low-pass tone (Hz)", 500, 20000, 20000, 20000, "%.0f" },
 };
 static param p_brown[] = {
-    { "Leak (deep <-> tight)", 0.9900, 0.9995, 0.997, 0.997, "%.4f" },
+    { "Leak (tight <-> deep)", 0.9000, 0.9995, 0.997, 0.997, "%.4f" },
+};
+static param p_deep[] = {
+    { "2nd-stage leak",      0.9000, 0.9995, 0.997, 0.997, "%.4f" },
 };
 static param p_rain[] = {
     { "Drop density (/s)",   5,   150,   60,   60,  "%.0f" },
@@ -51,8 +54,8 @@ static param p_sea[] = {
 };
 static param p_vol = { "Volume", 0.0, 1.0, 0.30, 0.30, "%.0f%%" };
 
-static param *param_sets[5] = { p_white, p_pink, p_brown, p_rain, p_sea };
-static const int param_counts[5] = { 1, 1, 1, 4, 4 };
+static param *param_sets[6] = { p_white, p_pink, p_brown, p_deep, p_rain, p_sea };
+static const int param_counts[6] = { 1, 1, 1, 1, 4, 4 };
 
 /* ================= synthesis ================= */
 
@@ -93,6 +96,20 @@ static double brown(void)
     /* loudness compensation: keep RMS constant as the leak changes */
     double comp = sqrt((1.0 - 0.997 * 0.997) / (1.0 - L * L));
     return acc * 3.5 * comp;
+}
+
+/* Deep (1/f^4, sometimes called "black" noise): brown noise fed through
+ * a second AR(1) integrator — a two-pole cascade, -12 dB/octave. The
+ * closed-form variance of the cascade normalizes loudness for any leak. */
+static double deep(void)
+{
+    static double a1, a2;
+    double p1 = 0.997, p2 = p_deep[0].val;
+    a1 = p1 * a1 + white_raw();
+    a2 = p2 * a2 + a1;
+    double var = (1.0 + p1 * p2) /
+                 ((1.0 - p1 * p2) * (1.0 - p1 * p1) * (1.0 - p2 * p2)) / 3.0;
+    return a2 / sqrt(var) * 0.5;
 }
 
 #define MAX_DROPS 64
@@ -181,32 +198,124 @@ static double sea(void)
 static double (*gen)(void) = brown;
 static SDL_atomic_t rms_milli;
 
+/* Spectrum tap: the callback writes raw generator output (pre-volume,
+ * so the display doesn't shrink with the volume slider) into a ring;
+ * the UI copies and FFTs it each frame. Reads may catch a torn frame,
+ * which is harmless for a display and avoids locking in the callback. */
+#define FFT_N 4096
+static double spec_ring[FFT_N];
+static SDL_atomic_t spec_widx;
+
 static void audio_cb(void *userdata, Uint8 *stream, int len)
 {
     (void)userdata;
     Sint16 *out = (Sint16 *)stream;
     int n = len / (int)sizeof(Sint16);
     double sumsq = 0.0;
+    static int wpos;
     for (int i = 0; i < n; i++) {
-        double s = gen() * p_vol.val;
+        double g = gen();
+        spec_ring[wpos++ & (FFT_N - 1)] = g;
+        double s = g * p_vol.val;
         if (s > 1.0) s = 1.0;
         if (s < -1.0) s = -1.0;
         sumsq += s * s;
         out[i] = (Sint16)lrint(s * 32767.0);
     }
+    SDL_AtomicSet(&spec_widx, wpos);
     SDL_AtomicSet(&rms_milli, (int)(sqrt(sumsq / n) * 1000.0));
+}
+
+/* ================= spectrum analysis (UI thread) ================= */
+
+/* In-place iterative radix-2 FFT. */
+static void fft(double *re, double *im, int n)
+{
+    for (int i = 1, j = 0; i < n; i++) {          /* bit-reversal permute */
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            double t = re[i]; re[i] = re[j]; re[j] = t;
+            t = im[i]; im[i] = im[j]; im[j] = t;
+        }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        double ang = -TWO_PI / len;
+        double wr = cos(ang), wi = sin(ang);
+        for (int i = 0; i < n; i += len) {
+            double cr = 1.0, ci = 0.0;
+            for (int j = 0; j < len / 2; j++) {
+                double ur = re[i + j], ui = im[i + j];
+                double vr = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci;
+                double vi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
+                re[i + j] = ur + vr;         im[i + j] = ui + vi;
+                re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
+                double ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = ncr;
+            }
+        }
+    }
+}
+
+#define NBARS  60
+#define SPEC_F_LO 30.0
+#define SPEC_F_HI 16000.0
+#define SPEC_DB_LO -70.0
+#define SPEC_DB_HI -15.0
+
+static double spec_bars[NBARS];   /* smoothed 0..1 heights */
+
+static void spectrum_update(int playing)
+{
+    static double hann[FFT_N];
+    static int init;
+    if (!init) {
+        for (int i = 0; i < FFT_N; i++)
+            hann[i] = 0.5 * (1.0 - cos(TWO_PI * i / (FFT_N - 1)));
+        init = 1;
+    }
+
+    double re[FFT_N], im[FFT_N];
+    int w = SDL_AtomicGet(&spec_widx);
+    for (int i = 0; i < FFT_N; i++) {
+        re[i] = spec_ring[(w - FFT_N + i) & (FFT_N - 1)] * hann[i];
+        im[i] = 0.0;
+    }
+    fft(re, im, FFT_N);
+
+    for (int b = 0; b < NBARS; b++) {
+        double f0 = SPEC_F_LO * pow(SPEC_F_HI / SPEC_F_LO, (double)b / NBARS);
+        double f1 = SPEC_F_LO * pow(SPEC_F_HI / SPEC_F_LO, (double)(b + 1) / NBARS);
+        int k0 = (int)(f0 * FFT_N / RATE), k1 = (int)(f1 * FFT_N / RATE);
+        if (k1 <= k0) k1 = k0 + 1;
+        double peak = 0.0;
+        for (int k = k0; k < k1 && k < FFT_N / 2; k++) {
+            double m2 = re[k] * re[k] + im[k] * im[k];
+            if (m2 > peak) peak = m2;
+        }
+        /* full-scale sine == 0 dB with mag/(N/4) normalization */
+        double db = 10.0 * log10(peak + 1e-18) - 20.0 * log10(FFT_N / 4.0);
+        double h = (db - SPEC_DB_LO) / (SPEC_DB_HI - SPEC_DB_LO);
+        if (h < 0.0) h = 0.0;
+        if (h > 1.0) h = 1.0;
+        if (!playing) h = 0.0;
+        /* fast attack, slow decay: peaks pop, then fall smoothly */
+        spec_bars[b] = (h > spec_bars[b]) ? h : spec_bars[b] * 0.90;
+    }
 }
 
 /* ================= GUI ================= */
 
 #define WIN_W 640
-#define WIN_H 480
+#define WIN_H 640
 
-static const char *names[5] = { "White", "Pink", "Brown", "Rain", "Sea" };
-static double (*gens[5])(void) = { white, pink, brown, rain, sea };
-static const SDL_Color accents[5] = {
+static const char *names[6] = { "White", "Pink", "Brown", "Deep", "Rain", "Sea" };
+static double (*gens[6])(void) = { white, pink, brown, deep, rain, sea };
+static const SDL_Color accents[6] = {
     { 200, 200, 200, 255 }, { 235, 140, 180, 255 }, { 170, 120, 70, 255 },
-    { 110, 170, 230, 255 }, {  60, 130, 160, 255 },
+    { 110, 100, 140, 255 }, { 110, 170, 230, 255 }, {  60, 130, 160, 255 },
 };
 
 static SDL_Rect sound_btn(int i)  { return (SDL_Rect){ 20, 20 + i * 58, 150, 48 }; }
@@ -215,6 +324,7 @@ static SDL_Rect reset_btn(void)   { return (SDL_Rect){ 190, 320, 150, 32 }; }
 static SDL_Rect vol_track(void)   { return (SDL_Rect){ 20, 388, 300, 8 }; }
 static SDL_Rect play_btn(void)    { return (SDL_Rect){ 20, 416, 120, 44 }; }
 static SDL_Rect vu_rect(void)     { return (SDL_Rect){ 160, 430, 460, 16 }; }
+static SDL_Rect spec_rect(void)   { return (SDL_Rect){ 20, 476, 600, 140 }; }
 
 static int hit(SDL_Rect r, int x, int y)
 {
@@ -321,7 +431,7 @@ int main(void)
 
     srand((unsigned)time(NULL));
 
-    int sel = 2, playing = 1;
+    int sel = 2, playing = 1;   /* brown */
     int drag = -1;   /* -1 none, 0..n-1 param slider j, 100 = volume */
     SDL_PauseAudioDevice(dev, 0);
 
@@ -357,7 +467,7 @@ int main(void)
                     break;
                 }
                 default:
-                    if (ev.key.keysym.sym >= SDLK_1 && ev.key.keysym.sym <= SDLK_5) {
+                    if (ev.key.keysym.sym >= SDLK_1 && ev.key.keysym.sym <= SDLK_6) {
                         sel = ev.key.keysym.sym - SDLK_1;
                         SDL_LockAudioDevice(dev);
                         gen = gens[sel];
@@ -368,7 +478,7 @@ int main(void)
 
             case SDL_MOUSEBUTTONDOWN: {
                 int x = ev.button.x, y = ev.button.y;
-                for (int i = 0; i < 5; i++)
+                for (int i = 0; i < 6; i++)
                     if (hit(sound_btn(i), x, y)) {
                         sel = i;
                         SDL_LockAudioDevice(dev);
@@ -413,7 +523,7 @@ int main(void)
         SDL_SetRenderDrawColor(ren, 24, 26, 30, 255);
         SDL_RenderClear(ren);
 
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 6; i++) {
             SDL_Rect r = sound_btn(i);
             if (i == sel)
                 SDL_SetRenderDrawColor(ren, accents[i].r / 2, accents[i].g / 2,
@@ -468,6 +578,32 @@ int main(void)
         SDL_Rect vf = vu; vf.w = (int)(vu.w * frac);
         SDL_SetRenderDrawColor(ren, accents[sel].r, accents[sel].g, accents[sel].b, 255);
         SDL_RenderFillRect(ren, &vf);
+
+        /* live spectrum */
+        spectrum_update(playing);
+        SDL_Rect sp = spec_rect();
+        SDL_SetRenderDrawColor(ren, 30, 32, 38, 255);
+        SDL_RenderFillRect(ren, &sp);
+        /* octave gridlines at 100 Hz, 1 kHz, 10 kHz */
+        const double marks[3] = { 100.0, 1000.0, 10000.0 };
+        const char *mlab[3] = { "100", "1k", "10k" };
+        for (int m = 0; m < 3; m++) {
+            double fx = log(marks[m] / SPEC_F_LO) / log(SPEC_F_HI / SPEC_F_LO);
+            int x = sp.x + (int)(fx * sp.w);
+            SDL_SetRenderDrawColor(ren, 55, 58, 66, 255);
+            SDL_RenderDrawLine(ren, x, sp.y, x, sp.y + sp.h);
+            draw_text(ren, small, mlab[m], x + 3, sp.y + sp.h - 18,
+                      (SDL_Color){ 130, 135, 145, 255 });
+        }
+        int bw = sp.w / NBARS;
+        for (int b = 0; b < NBARS; b++) {
+            int h = (int)(spec_bars[b] * (sp.h - 4));
+            if (h < 1) continue;
+            SDL_Rect bar = { sp.x + b * bw + 1, sp.y + sp.h - 2 - h, bw - 2, h };
+            SDL_SetRenderDrawColor(ren, accents[sel].r, accents[sel].g,
+                                   accents[sel].b, 255);
+            SDL_RenderFillRect(ren, &bar);
+        }
 
         SDL_RenderPresent(ren);
         if (!have_vsync) SDL_Delay(16);

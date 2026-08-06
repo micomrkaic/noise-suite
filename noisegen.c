@@ -1,7 +1,7 @@
 /* noisegen.c — generate white, pink, or brown noise as a 16-bit mono WAV.
  *
  * Build:  cc -O2 -o noisegen noisegen.c -lm
- * Usage:  ./noisegen white|pink|brown seconds out.wav
+ * Usage:  ./noisegen white|pink|brown|deep seconds out.wav
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -45,6 +45,18 @@ static double brown(void)
     return acc * 3.5; /* rough loudness match */
 }
 
+/* 1/f^4 ("black"): brown through a second AR(1) stage, -12 dB/octave */
+static double deep(void)
+{
+    static double a1, a2;
+    const double p = 0.997;
+    a1 = p * a1 + white();
+    a2 = p * a2 + a1;
+    const double var = (1.0 + p * p) /
+                       ((1.0 - p * p) * (1.0 - p * p) * (1.0 - p * p)) / 3.0;
+    return a2 / sqrt(var) * 0.5;
+}
+
 static void wav_header(FILE *f, uint32_t nsamples)
 {
     uint32_t data_bytes = nsamples * 2;      /* 16-bit mono */
@@ -69,13 +81,14 @@ static void wav_header(FILE *f, uint32_t nsamples)
 int main(int argc, char **argv)
 {
     if (argc != 4) {
-        fprintf(stderr, "usage: %s white|pink|brown seconds out.wav\n", argv[0]);
+        fprintf(stderr, "usage: %s white|pink|brown|deep seconds out.wav\n", argv[0]);
         return 1;
     }
     double (*gen)(void) =
         strcmp(argv[1], "white") == 0 ? white :
         strcmp(argv[1], "pink")  == 0 ? pink  :
-        strcmp(argv[1], "brown") == 0 ? brown : NULL;
+        strcmp(argv[1], "brown") == 0 ? brown :
+        strcmp(argv[1], "deep")  == 0 ? deep  : NULL;
     if (!gen) { fprintf(stderr, "unknown noise type '%s'\n", argv[1]); return 1; }
 
     double seconds = atof(argv[2]);

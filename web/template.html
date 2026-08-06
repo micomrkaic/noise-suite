@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#181a1e">
+<title>noise machine</title>
+<style>
+  :root { --bg:#181a1e; --panel:#2d3036; --edge:#43464e; --text:#e6e6e6; --dim:#aab; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:16px/1.4 system-ui,-apple-system,sans-serif;
+         padding:16px; max-width:520px; margin-inline:auto;
+         user-select:none; -webkit-user-select:none; }
+  h1 { font-size:18px; font-weight:600; margin:0 0 14px; color:var(--dim); }
+  .sounds { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:16px; }
+  .sounds button {
+    padding:14px 0; font-size:16px; color:var(--text);
+    background:var(--panel); border:1px solid var(--edge); border-radius:10px; }
+  .sounds button.on { border-width:2px; font-weight:600; }
+  .param { margin:10px 0; }
+  .param label { display:flex; justify-content:space-between;
+                 font-size:13px; color:var(--dim); margin-bottom:2px; }
+  input[type=range] { width:100%; accent-color:#78b478; height:28px; }
+  #reset { font-size:13px; color:var(--dim); background:none;
+           border:1px solid var(--edge); border-radius:8px; padding:6px 12px; margin:4px 0 12px; }
+  .row { display:flex; gap:12px; align-items:center; margin:14px 0 10px; }
+  #play { flex:0 0 96px; padding:14px 0; font-size:17px; font-weight:600;
+          color:var(--text); background:var(--panel);
+          border:1px solid var(--edge); border-radius:10px; }
+  #vuwrap { flex:1; height:14px; background:var(--panel); border-radius:7px; overflow:hidden; }
+  #vu { height:100%; width:0%; background:#78b478; }
+  canvas { width:100%; height:150px; background:#1e2026; border-radius:10px; display:block; }
+  footer { font-size:11px; color:#667; margin-top:10px; text-align:center; }
+</style>
+</head>
+<body>
+<h1>noise machine</h1>
+
+<div class="sounds" id="sounds"></div>
+<div id="params"></div>
+<button id="reset">Reset to defaults</button>
+
+<div class="row">
+  <button id="play">Play</button>
+  <div id="vuwrap"><div id="vu"></div></div>
+</div>
+
+<canvas id="spec"></canvas>
+<div id="status" style="font-size:12px;color:#889;min-height:16px;margin-top:6px">JavaScript has not run. If you are seeing this on iPhone, you are probably in a file preview (Quick Look), which never runs scripts — open this page via a URL in Safari instead (e.g. GitHub Pages or a local http server).</div>
+<footer>white &middot; pink &middot; brown &middot; deep &middot; rain &middot; sea &mdash; C compiled to WebAssembly</footer>
+
+<script>
+"use strict";
+
+/* ---- sound + parameter tables (mirror dsp.c flat indices) ---- */
+const SOUNDS = [
+  { name:"White", color:"#c8c8c8", params:[0] },
+  { name:"Pink",  color:"#eb8cb4", params:[1] },
+  { name:"Brown", color:"#aa7846", params:[2] },
+  { name:"Deep",  color:"#6e648c", params:[3] },
+  { name:"Rain",  color:"#6eaae6", params:[4,5,6,7] },
+  { name:"Sea",   color:"#3c82a0", params:[8,9,10,11] },
+];
+const PARAMS = [
+  { name:"Low-pass tone (Hz)", lo:500,   hi:20000,  fmt:v=>v.toFixed(0) },
+  { name:"Low-pass tone (Hz)", lo:500,   hi:20000,  fmt:v=>v.toFixed(0) },
+  { name:"Leak (tight ↔ deep)",lo:0.90,  hi:0.9995, fmt:v=>v.toFixed(4) },
+  { name:"2nd-stage leak",     lo:0.90,  hi:0.9995, fmt:v=>v.toFixed(4) },
+  { name:"Drop density (/s)",  lo:5,     hi:150,    fmt:v=>v.toFixed(0) },
+  { name:"Drop tone (Hz)",     lo:150,   hi:3000,   fmt:v=>v.toFixed(0) },
+  { name:"Drop level",         lo:0,     hi:3,      fmt:v=>v.toFixed(2) },
+  { name:"Hiss level",         lo:0,     hi:0.5,    fmt:v=>v.toFixed(2) },
+  { name:"Wave period (s)",    lo:4,     hi:20,     fmt:v=>v.toFixed(1) },
+  { name:"Crash sharpness",    lo:1,     hi:5,      fmt:v=>v.toFixed(1) },
+  { name:"Surf brightness (Hz)",lo:1000, hi:8000,   fmt:v=>v.toFixed(0) },
+  { name:"Rumble level",       lo:0,     hi:5,      fmt:v=>v.toFixed(2) },
+];
+
+const WASM_B64 = "__WASM_B64__";
+
+let dsp, defaults = [], sel = 2, volume = 0.3;
+const status = msg => { document.getElementById("status").textContent = msg; };
+const fail = msg => {
+  const s = document.getElementById("status");
+  s.textContent = "Error: " + msg;
+  s.style.color = "#e07070";
+};
+window.onerror = (m) => fail(m);
+window.onunhandledrejection = e => fail(e.reason && e.reason.message || e.reason);
+
+/* iOS mutes Web Audio when the ring/silent switch is on silent; playing
+ * a looped silent <audio> in the same tap switches the audio session to
+ * "playback", which ignores the switch. */
+const SILENT_WAV = "data:audio/wav;base64,UklGRqQMAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YYAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+let unlockEl = null;
+function iosUnlock() {
+  if (unlockEl) return;
+  unlockEl = new Audio(SILENT_WAV);
+  unlockEl.loop = true;
+  unlockEl.play().catch(() => {});
+}
+let ctx = null, node = null, analyser = null, gainNode = null, playing = false;
+let vuLevel = 0;
+
+async function loadWasm() {
+  const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
+  const { instance } = await WebAssembly.instantiate(bytes.buffer, {});
+  dsp = instance.exports;
+  if (dsp._initialize) dsp._initialize();
+  dsp.dsp_init(44100);                        /* re-inited with real rate on play */
+  for (let i = 0; i < dsp.dsp_num_params(); i++) defaults.push(dsp.dsp_get_param(i));
+  status("");
+}
+
+/* ---- UI construction ---- */
+function buildSounds() {
+  const box = document.getElementById("sounds");
+  SOUNDS.forEach((s, i) => {
+    const b = document.createElement("button");
+    b.textContent = s.name;
+    b.style.borderColor = s.color;
+    b.onclick = () => { sel = i; if (dsp) dsp.dsp_set_sound(i); refresh(); };
+    box.appendChild(b);
+  });
+}
+
+function buildParams() {
+  const box = document.getElementById("params");
+  box.innerHTML = "";
+  const mk = (label, lo, hi, val, fmt, oninput) => {
+    const d = document.createElement("div");
+    d.className = "param";
+    const lab = document.createElement("label");
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = label;
+    const valSpan = document.createElement("span");
+    valSpan.textContent = fmt(val);
+    lab.append(nameSpan, valSpan);
+    const r = document.createElement("input");
+    r.type = "range"; r.min = 0; r.max = 1000;
+    r.value = (val - lo) / (hi - lo) * 1000;
+    r.oninput = () => {
+      const v = lo + (r.value / 1000) * (hi - lo);
+      valSpan.textContent = fmt(v);
+      oninput(v);
+    };
+    d.append(lab, r);
+    box.appendChild(d);
+    return r;
+  };
+  if (dsp) SOUNDS[sel].params.forEach(pi => {
+    const p = PARAMS[pi];
+    mk(p.name, p.lo, p.hi, dsp.dsp_get_param(pi), p.fmt,
+       v => dsp.dsp_set_param(pi, v));
+  });
+  mk("Volume", 0, 1, volume, v => (v * 100).toFixed(0) + "%",
+     v => { volume = v; if (gainNode) gainNode.gain.value = v; });
+}
+
+function refresh() {
+  document.querySelectorAll("#sounds button").forEach((b, i) => {
+    b.classList.toggle("on", i === sel);
+    b.style.background = i === sel ? SOUNDS[i].color + "40" : "";
+  });
+  buildParams();
+}
+
+document.getElementById("reset").onclick = () => {
+  SOUNDS[sel].params.forEach(pi => dsp.dsp_set_param(pi, defaults[pi]));
+  buildParams();
+};
+
+/* ---- audio ---- */
+function startAudio() {
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  dsp.dsp_init(ctx.sampleRate);
+  dsp.dsp_set_sound(sel);
+  /* ScriptProcessorNode: deprecated but works everywhere including
+   * plain-http and file:// contexts, unlike AudioWorklet. Fine here —
+   * latency is irrelevant for a noise machine. */
+  node = ctx.createScriptProcessor(4096, 1, 1);
+  node.onaudioprocess = e => {
+    const out = e.outputBuffer.getChannelData(0);
+    dsp.dsp_render(out.length);
+    out.set(new Float32Array(dsp.memory.buffer, dsp.dsp_get_buf(), out.length));
+    let sum = 0;
+    for (let i = 0; i < out.length; i += 16) sum += out[i] * out[i];
+    vuLevel = Math.sqrt(sum / (out.length / 16)) * volume;
+  };
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 4096;
+  analyser.smoothingTimeConstant = 0.82;
+  gainNode = ctx.createGain();
+  gainNode.gain.value = volume;
+  node.connect(analyser);        /* analyser taps pre-volume: shape stays */
+  analyser.connect(gainNode);    /* visible however quiet you set it     */
+  gainNode.connect(ctx.destination);
+}
+
+document.getElementById("play").onclick = async () => {
+  try {
+    if (!dsp) { fail("synth not loaded yet"); return; }
+    iosUnlock();                     /* must happen inside the tap gesture */
+    if (!ctx) startAudio();
+    if (playing) { await ctx.suspend(); if (unlockEl) unlockEl.pause(); playing = false; }
+    else         { await ctx.resume();  if (unlockEl) unlockEl.play().catch(()=>{}); playing = true; }
+    document.getElementById("play").textContent = playing ? "Pause" : "Play";
+    status(playing ? "playing @ " + ctx.sampleRate + " Hz" : "");
+  } catch (err) { fail(err.message || err); }
+};
+
+/* ---- spectrum + VU ---- */
+const canvas = document.getElementById("spec");
+const F_LO = 30, F_HI = 16000, NBARS = 48;
+
+function drawLoop() {
+  requestAnimationFrame(drawLoop);
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth * dpr, h = 150 * dpr;
+  if (canvas.width !== w) { canvas.width = w; canvas.height = h; }
+  const g = canvas.getContext("2d");
+  g.fillStyle = "#1e2026";
+  g.fillRect(0, 0, w, h);
+
+  /* gridlines */
+  g.fillStyle = "#374";
+  [[100,"100"],[1000,"1k"],[10000,"10k"]].forEach(([f, lab]) => {
+    const x = Math.log(f / F_LO) / Math.log(F_HI / F_LO) * w;
+    g.fillStyle = "#373a42"; g.fillRect(x, 0, dpr, h);
+    g.fillStyle = "#828794"; g.font = (11 * dpr) + "px sans-serif";
+    g.fillText(lab, x + 4 * dpr, h - 6 * dpr);
+  });
+
+  document.getElementById("vu").style.width =
+    playing ? Math.min(100, Math.max(0, (20 * Math.log10(vuLevel + 1e-5) + 60) / 60 * 100)) + "%" : "0%";
+
+  if (!analyser || !playing) return;
+  const bins = new Float32Array(analyser.frequencyBinCount);
+  analyser.getFloatFrequencyData(bins);
+  const binHz = ctx.sampleRate / analyser.fftSize;
+  g.fillStyle = SOUNDS[sel].color;
+  const bw = w / NBARS;
+  for (let b = 0; b < NBARS; b++) {
+    const f0 = F_LO * Math.pow(F_HI / F_LO, b / NBARS);
+    const f1 = F_LO * Math.pow(F_HI / F_LO, (b + 1) / NBARS);
+    let peak = -200;
+    for (let k = Math.floor(f0 / binHz); k <= f1 / binHz && k < bins.length; k++)
+      if (bins[k] > peak) peak = bins[k];
+    const frac = Math.min(1, Math.max(0, (peak + 100) / 70));   /* -100..-30 dB */
+    const bh = frac * (h - 4 * dpr);
+    if (bh > 1) g.fillRect(b * bw + dpr, h - 2 * dpr - bh, bw - 2 * dpr, bh);
+  }
+}
+
+/* ---- boot: UI first, so failures are visible on-page ---- */
+status(""); buildSounds(); refresh(); drawLoop();
+status("loading synth\u2026");
+loadWasm().then(() => refresh()).catch(e => fail("wasm: " + (e.message || e)));
+</script>
+</body>
+</html>
