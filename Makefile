@@ -32,6 +32,9 @@ samples: noisegen soundscape
 	./noisegen deep  30 samples/deep.wav
 	./soundscape rain 30 samples/rain.wav
 	./soundscape sea  30 samples/sea.wav
+	./soundscape wind 30 samples/wind.wav
+	./soundscape stream 30 samples/stream.wav
+	./soundscape birds 30 samples/birds.wav
 
 clean:
 	rm -f $(ALL)

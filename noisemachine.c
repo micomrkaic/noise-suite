@@ -2,7 +2,7 @@
  * Plays any of: white, pink, brown, rain, sea.
  *
  * Build:  cc -O2 -o noisemachine noisemachine.c $(sdl2-config --cflags --libs) -lm
- * Usage:  ./noisemachine white|pink|brown|deep|rain|sea [volume 0..1]
+ * Usage:  ./noisemachine white|pink|brown|deep|rain|sea|wind|stream|birds [volume 0..1]
  *         Ctrl-C to stop.
  */
 #include <SDL2/SDL.h>
@@ -123,6 +123,158 @@ static double rain(void)
     return 1.6 * s + 0.15 * bed * wob;
 }
 
+
+#define P_WGUST  0.6
+#define P_WRUST  0.6
+#define P_WTONE  250.0
+#define P_SRATE  50.0
+#define P_SPITCH 900.0
+#define P_SBLVL  0.9
+#define P_SFLOW  0.12
+#define P_BRATE  2.5
+#define P_BPITCH 2800.0
+#define P_BAMB   0.03
+
+/* ---- wind in the forest ---- */
+static lp1 wg_lp, wf_lp, wb_lp1, wb_lp2, wr_hp, wr_lp;
+
+static double snd_wind(void)
+{
+    /* gust: very slow filtered noise scales gain AND brightness */
+    double g = 0.5 + 400.0 * P_WGUST * lp1_run(&wg_lp, white(), lp_coef(0.12));
+    if (g < 0.05) g = 0.05;
+    if (g > 1.0)  g = 1.0;
+    double fl = 1.0 + 30.0 * lp1_run(&wf_lp, white(), lp_coef(1.5));   /* flutter */
+    if (fl < 0.7) fl = 0.7;
+    if (fl > 1.3) fl = 1.3;
+    double fc = P_WTONE * (0.6 + 1.8 * g);
+    double body = lp1_run(&wb_lp2, lp1_run(&wb_lp1, white(), lp_coef(fc)), lp_coef(fc));
+    double w = white();
+    double hp = w - lp1_run(&wr_hp, w, lp_coef(2000.0));
+    double rust = lp1_run(&wr_lp, hp, lp_coef(6000.0));   /* leaf band 2-6 kHz */
+    return (2.6 * body * (0.15 + 0.85 * g) + 0.55 * P_WRUST * g * g * rust) * fl;
+}
+
+/* ---- stream: bubbles are damped sines with an UPWARD chirp
+ * (downward chirps read as birdsong; rising pitch reads as water) ---- */
+#define MAX_BUBBLES 24
+typedef struct { double ph, f, c, ed, dd, ea, da, amp; int alive; } bubble;
+static bubble bubbles[MAX_BUBBLES];
+static lp1 st_hp, st_lp, st_wob;
+
+static void spawn_bubble(void)
+{
+    for (int i = 0; i < MAX_BUBBLES; i++)
+        if (!bubbles[i].alive) {
+            bubble *b = &bubbles[i];
+            b->alive = 1;
+            b->ph = 0.0;
+            b->f  = P_SPITCH * (0.6 + 1.2 * frand());
+            b->c  = 1.0 + (0.3 + frand()) * 0.00045;
+            double dec_ms = 10.0 + frand() * 30.0, atk_ms = 1.0 + frand() * 2.0;
+            b->dd = exp(-1.0 / (dec_ms * 0.001 * RATE));
+            b->da = exp(-1.0 / (atk_ms * 0.001 * RATE));
+            b->ed = 1.0; b->ea = 1.0;
+            b->amp = 0.05 + frand() * frand() * 0.25;
+            return;
+        }
+}
+
+static double snd_stream(void)
+{
+    if (frand() < P_SRATE / RATE) spawn_bubble();
+    double s = 0.0;
+    for (int i = 0; i < MAX_BUBBLES; i++) {
+        bubble *b = &bubbles[i];
+        if (!b->alive) continue;
+        s += b->amp * (b->ed - b->ea) * sin(b->ph);
+        b->ph += TWO_PI * b->f / RATE;
+        b->f *= b->c;
+        b->ed *= b->dd; b->ea *= b->da;
+        if (b->ed < 1e-4) b->alive = 0;
+    }
+    double w = white();
+    double hp = w - lp1_run(&st_hp, w, lp_coef(700.0));
+    double bed = lp1_run(&st_lp, hp, lp_coef(3000.0));
+    double wob = 1.0 + 40.0 * lp1_run(&st_wob, white(), lp_coef(2.0));
+    if (wob < 0.6) wob = 0.6;
+    if (wob > 1.4) wob = 1.4;
+    return P_SBLVL * s + P_SFLOW * bed * wob;
+}
+
+/* ---- birds: Poisson songs, each a burst of gliding, trilling chirps ---- */
+#define MAX_BIRDS 3
+typedef struct {
+    int active, chirping, chirps_left;
+    double gap, ph, f0, f, glide, trill_m, trill_f, trill_ph;
+    double ed, dd, ea, da, amp, dur, t;
+} birdv;
+static birdv birds_v[MAX_BIRDS];
+static lp1 ba_hp, ba_lp;
+
+static void start_chirp(birdv *b)
+{
+    b->chirping = 1;
+    b->t = 0.0;
+    b->ph = 0.0;
+    b->f0 = P_BPITCH * (0.8 + 0.5 * frand());
+    b->f  = b->f0;
+    b->glide = (frand() < 0.5 ? 1.0 : -1.0) * (0.10 + 0.25 * frand());
+    b->trill_m = frand() * 0.10;
+    b->trill_f = 20.0 + frand() * 40.0;
+    b->trill_ph = 0.0;
+    b->dur = (0.04 + frand() * 0.11) * RATE;
+    double atk_ms = 3.0 + frand() * 6.0, dec_ms = 30.0 + frand() * 90.0;
+    b->dd = exp(-1.0 / (dec_ms * 0.001 * RATE));
+    b->da = exp(-1.0 / (atk_ms * 0.001 * RATE));
+    b->ed = 1.0; b->ea = 1.0;
+    b->amp = 0.10 + frand() * 0.20;
+}
+
+static double snd_birds(void)
+{
+    if (frand() < (P_BRATE / 10.0) / RATE) {
+        for (int i = 0; i < MAX_BIRDS; i++)
+            if (!birds_v[i].active) {
+                birds_v[i].active = 1;
+                birds_v[i].chirps_left = 2 + (int)(frand() * 5.0);
+                birds_v[i].gap = 0.0;
+                birds_v[i].chirping = 0;
+                break;
+            }
+    }
+    double s = 0.0;
+    for (int i = 0; i < MAX_BIRDS; i++) {
+        birdv *b = &birds_v[i];
+        if (!b->active) continue;
+        if (!b->chirping) {
+            b->gap -= 1.0;
+            if (b->gap <= 0.0) {
+                if (b->chirps_left-- > 0) start_chirp(b);
+                else { b->active = 0; continue; }
+            }
+        }
+        if (b->chirping) {
+            double frac = b->t / b->dur;
+            if (frac > 1.0) frac = 1.0;
+            s += b->amp * (b->ed - b->ea) * sin(b->ph);
+            b->ph += TWO_PI * b->f * (1.0 + b->trill_m * sin(b->trill_ph)) / RATE;
+            b->trill_ph += TWO_PI * b->trill_f / RATE;
+            b->f = b->f0 * (1.0 + b->glide * frac);
+            b->ed *= b->dd; b->ea *= b->da;
+            b->t += 1.0;
+            if (b->t >= b->dur && b->ed < 5e-3) {
+                b->chirping = 0;
+                b->gap = (0.06 + frand() * 0.14) * RATE;
+            }
+        }
+    }
+    double w = white();
+    double hp = w - lp1_run(&ba_hp, w, lp_coef(400.0));
+    double amb = lp1_run(&ba_lp, hp, lp_coef(2500.0));
+    return s + P_BAMB * amb;
+}
+
 static lp1 surf_lp, rumble_lp1, rumble_lp2;
 
 static double sea(void)
@@ -165,7 +317,7 @@ static void audio_cb(void *userdata, Uint8 *stream, int len)
 int main(int argc, char **argv)
 {
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s white|pink|brown|deep|rain|sea [volume 0..1]\n", argv[0]);
+        fprintf(stderr, "usage: %s white|pink|brown|deep|rain|sea|wind|stream|birds [volume 0..1]\n", argv[0]);
         return 1;
     }
     gen = strcmp(argv[1], "white") == 0 ? white :
@@ -173,7 +325,10 @@ int main(int argc, char **argv)
           strcmp(argv[1], "brown") == 0 ? brown :
           strcmp(argv[1], "deep")  == 0 ? deep  :
           strcmp(argv[1], "rain")  == 0 ? rain  :
-          strcmp(argv[1], "sea")   == 0 ? sea   : NULL;
+          strcmp(argv[1], "sea")   == 0 ? sea   :
+          strcmp(argv[1], "wind")  == 0 ? snd_wind   :
+          strcmp(argv[1], "stream")== 0 ? snd_stream :
+          strcmp(argv[1], "birds") == 0 ? snd_birds  : NULL;
     if (!gen) { fprintf(stderr, "unknown sound '%s'\n", argv[1]); return 1; }
 
     if (argc == 3) {

@@ -113,7 +113,7 @@
 
 <canvas id="spec"></canvas>
 <div id="status" style="font-size:12px;color:#889;min-height:16px;margin-top:6px">JavaScript has not run. If you are seeing this on iPhone, you are probably in a file preview (Quick Look), which never runs scripts — open this page via a URL in Safari instead (e.g. GitHub Pages or a local http server).</div>
-<footer>ZzzTop &mdash; white &middot; pink &middot; brown &middot; airplane &middot; rain &middot; sea &mdash; C compiled to WebAssembly</footer>
+<footer>ZzzTop &mdash; nine sounds from white noise to birdsong &mdash; C compiled to WebAssembly</footer>
 
 <script>
 "use strict";
@@ -126,6 +126,9 @@ const SOUNDS = [
   { name:"Airplane", color:"#6e648c", params:[3] },
   { name:"Rain",  color:"#6eaae6", params:[4,5,6,7] },
   { name:"Sea",   color:"#3c82a0", params:[8,9,10,11] },
+  { name:"Wind",  color:"#7fae6b", params:[12,13,14] },
+  { name:"Stream",color:"#6ec8b0", params:[15,16,17,18] },
+  { name:"Birds", color:"#e6c86e", params:[19,20,21] },
 ];
 const PARAMS = [
   { name:"Low-pass tone (Hz)", lo:500,   hi:20000,  fmt:v=>v.toFixed(0) },
@@ -140,6 +143,16 @@ const PARAMS = [
   { name:"Crash sharpness",    lo:1,     hi:5,      fmt:v=>v.toFixed(1) },
   { name:"Surf brightness (Hz)",lo:1000, hi:8000,   fmt:v=>v.toFixed(0) },
   { name:"Rumble level",       lo:0,     hi:5,      fmt:v=>v.toFixed(2) },
+  { name:"Gustiness",          lo:0,     hi:1,      fmt:v=>v.toFixed(2) },
+  { name:"Leaf rustle",        lo:0,     hi:1.5,    fmt:v=>v.toFixed(2) },
+  { name:"Body tone (Hz)",     lo:100,   hi:700,    fmt:v=>v.toFixed(0) },
+  { name:"Bubble rate (/s)",   lo:10,    hi:150,    fmt:v=>v.toFixed(0) },
+  { name:"Bubble pitch (Hz)",  lo:300,   hi:2000,   fmt:v=>v.toFixed(0) },
+  { name:"Bubble level",       lo:0,     hi:2,      fmt:v=>v.toFixed(2) },
+  { name:"Flow level",         lo:0,     hi:0.4,    fmt:v=>v.toFixed(2) },
+  { name:"Songs per 10 s",     lo:0.5,   hi:10,     fmt:v=>v.toFixed(1) },
+  { name:"Pitch (Hz)",         lo:1500,  hi:5000,   fmt:v=>v.toFixed(0) },
+  { name:"Ambience",           lo:0,     hi:0.25,   fmt:v=>v.toFixed(2) },
 ];
 
 const WASM_B64 = "__WASM_B64__";

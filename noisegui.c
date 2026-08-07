@@ -1,7 +1,7 @@
 /* noisegui.c — sleep-sound machine with per-sound tuning controls.
  * Left: pick a sound. Right: live sliders for that sound's synthesis
  * parameters. Bottom: master volume, play/pause, VU meter.
- * Keys: 1-6 select sound, space play/pause, up/down volume, r resets
+ * Keys: 1-9 select sound, space play/pause, up/down volume, r resets
  * the selected sound's parameters, Esc quits.
  *
  * Build:  cc -O2 -o noisegui noisegui.c $(sdl2-config --cflags --libs) -lSDL2_ttf -lm
@@ -46,6 +46,22 @@ static param p_rain[] = {
     { "Drop level",          0.0, 3.0,   1.6,  1.6,  "%.2f" },
     { "Hiss level",          0.0, 0.5,   0.15, 0.15, "%.2f" },
 };
+static param p_wind[] = {
+    { "Gustiness",           0.0,  1.0,   0.6,  0.6,  "%.2f" },
+    { "Leaf rustle",         0.0,  1.5,   0.6,  0.6,  "%.2f" },
+    { "Body tone (Hz)",      100,  700,   250,  250,  "%.0f" },
+};
+static param p_stream[] = {
+    { "Bubble rate (/s)",    10,   150,   50,   50,   "%.0f" },
+    { "Bubble pitch (Hz)",   300,  2000,  900,  900,  "%.0f" },
+    { "Bubble level",        0.0,  2.0,   0.9,  0.9,  "%.2f" },
+    { "Flow level",          0.0,  0.4,   0.12, 0.12, "%.2f" },
+};
+static param p_birds[] = {
+    { "Songs per 10 s",      0.5,  10,    2.5,  2.5,  "%.1f" },
+    { "Pitch (Hz)",          1500, 5000,  2800, 2800, "%.0f" },
+    { "Ambience",            0.0,  0.25,  0.03, 0.03, "%.2f" },
+};
 static param p_sea[] = {
     { "Wave period (s)",     4,    20,   9.0,  9.0,  "%.1f" },
     { "Crash sharpness",     1.0,  5.0,  3.0,  3.0,  "%.1f" },
@@ -54,8 +70,8 @@ static param p_sea[] = {
 };
 static param p_vol = { "Volume", 0.0, 1.0, 0.30, 0.30, "%.0f%%" };
 
-static param *param_sets[6] = { p_white, p_pink, p_brown, p_deep, p_rain, p_sea };
-static const int param_counts[6] = { 1, 1, 1, 1, 4, 4 };
+static param *param_sets[9] = { p_white, p_pink, p_brown, p_deep, p_rain, p_sea, p_wind, p_stream, p_birds };
+static const int param_counts[9] = { 1, 1, 1, 1, 4, 4, 3, 4, 3 };
 
 /* ================= synthesis ================= */
 
@@ -169,6 +185,157 @@ static double rain(void)
     if (wob > 1.5) wob = 1.5;
     return p_rain[2].val * s + p_rain[3].val * bed * wob;
 }
+
+#define P_WGUST  p_wind[0].val
+#define P_WRUST  p_wind[1].val
+#define P_WTONE  p_wind[2].val
+#define P_SRATE  p_stream[0].val
+#define P_SPITCH p_stream[1].val
+#define P_SBLVL  p_stream[2].val
+#define P_SFLOW  p_stream[3].val
+#define P_BRATE  p_birds[0].val
+#define P_BPITCH p_birds[1].val
+#define P_BAMB   p_birds[2].val
+/* ---- wind in the forest ---- */
+static lp1 wg_lp, wf_lp, wb_lp1, wb_lp2, wr_hp, wr_lp;
+
+static double snd_wind(void)
+{
+    /* gust: very slow filtered noise scales gain AND brightness */
+    double g = 0.5 + 400.0 * P_WGUST * lp1_run(&wg_lp, white_raw(), lp_coef(0.12));
+    if (g < 0.05) g = 0.05;
+    if (g > 1.0)  g = 1.0;
+    double fl = 1.0 + 30.0 * lp1_run(&wf_lp, white_raw(), lp_coef(1.5));   /* flutter */
+    if (fl < 0.7) fl = 0.7;
+    if (fl > 1.3) fl = 1.3;
+    double fc = P_WTONE * (0.6 + 1.8 * g);
+    double body = lp1_run(&wb_lp2, lp1_run(&wb_lp1, white_raw(), lp_coef(fc)), lp_coef(fc));
+    double w = white_raw();
+    double hp = w - lp1_run(&wr_hp, w, lp_coef(2000.0));
+    double rust = lp1_run(&wr_lp, hp, lp_coef(6000.0));   /* leaf band 2-6 kHz */
+    return (2.6 * body * (0.15 + 0.85 * g) + 0.55 * P_WRUST * g * g * rust) * fl;
+}
+
+/* ---- stream: bubbles are damped sines with an UPWARD chirp
+ * (downward chirps read as birdsong; rising pitch reads as water) ---- */
+#define MAX_BUBBLES 24
+typedef struct { double ph, f, c, ed, dd, ea, da, amp; int alive; } bubble;
+static bubble bubbles[MAX_BUBBLES];
+static lp1 st_hp, st_lp, st_wob;
+
+static void spawn_bubble(void)
+{
+    for (int i = 0; i < MAX_BUBBLES; i++)
+        if (!bubbles[i].alive) {
+            bubble *b = &bubbles[i];
+            b->alive = 1;
+            b->ph = 0.0;
+            b->f  = P_SPITCH * (0.6 + 1.2 * frand());
+            b->c  = 1.0 + (0.3 + frand()) * 0.00045;
+            double dec_ms = 10.0 + frand() * 30.0, atk_ms = 1.0 + frand() * 2.0;
+            b->dd = exp(-1.0 / (dec_ms * 0.001 * (double)RATE));
+            b->da = exp(-1.0 / (atk_ms * 0.001 * (double)RATE));
+            b->ed = 1.0; b->ea = 1.0;
+            b->amp = 0.05 + frand() * frand() * 0.25;
+            return;
+        }
+}
+
+static double snd_stream(void)
+{
+    if (frand() < P_SRATE / (double)RATE) spawn_bubble();
+    double s = 0.0;
+    for (int i = 0; i < MAX_BUBBLES; i++) {
+        bubble *b = &bubbles[i];
+        if (!b->alive) continue;
+        s += b->amp * (b->ed - b->ea) * sin(b->ph);
+        b->ph += TWO_PI * b->f / (double)RATE;
+        b->f *= b->c;
+        b->ed *= b->dd; b->ea *= b->da;
+        if (b->ed < 1e-4) b->alive = 0;
+    }
+    double w = white_raw();
+    double hp = w - lp1_run(&st_hp, w, lp_coef(700.0));
+    double bed = lp1_run(&st_lp, hp, lp_coef(3000.0));
+    double wob = 1.0 + 40.0 * lp1_run(&st_wob, white_raw(), lp_coef(2.0));
+    if (wob < 0.6) wob = 0.6;
+    if (wob > 1.4) wob = 1.4;
+    return P_SBLVL * s + P_SFLOW * bed * wob;
+}
+
+/* ---- birds: Poisson songs, each a burst of gliding, trilling chirps ---- */
+#define MAX_BIRDS 3
+typedef struct {
+    int active, chirping, chirps_left;
+    double gap, ph, f0, f, glide, trill_m, trill_f, trill_ph;
+    double ed, dd, ea, da, amp, dur, t;
+} birdv;
+static birdv birds_v[MAX_BIRDS];
+static lp1 ba_hp, ba_lp;
+
+static void start_chirp(birdv *b)
+{
+    b->chirping = 1;
+    b->t = 0.0;
+    b->ph = 0.0;
+    b->f0 = P_BPITCH * (0.8 + 0.5 * frand());
+    b->f  = b->f0;
+    b->glide = (frand() < 0.5 ? 1.0 : -1.0) * (0.10 + 0.25 * frand());
+    b->trill_m = frand() * 0.10;
+    b->trill_f = 20.0 + frand() * 40.0;
+    b->trill_ph = 0.0;
+    b->dur = (0.04 + frand() * 0.11) * (double)RATE;
+    double atk_ms = 3.0 + frand() * 6.0, dec_ms = 30.0 + frand() * 90.0;
+    b->dd = exp(-1.0 / (dec_ms * 0.001 * (double)RATE));
+    b->da = exp(-1.0 / (atk_ms * 0.001 * (double)RATE));
+    b->ed = 1.0; b->ea = 1.0;
+    b->amp = 0.10 + frand() * 0.20;
+}
+
+static double snd_birds(void)
+{
+    if (frand() < (P_BRATE / 10.0) / (double)RATE) {
+        for (int i = 0; i < MAX_BIRDS; i++)
+            if (!birds_v[i].active) {
+                birds_v[i].active = 1;
+                birds_v[i].chirps_left = 2 + (int)(frand() * 5.0);
+                birds_v[i].gap = 0.0;
+                birds_v[i].chirping = 0;
+                break;
+            }
+    }
+    double s = 0.0;
+    for (int i = 0; i < MAX_BIRDS; i++) {
+        birdv *b = &birds_v[i];
+        if (!b->active) continue;
+        if (!b->chirping) {
+            b->gap -= 1.0;
+            if (b->gap <= 0.0) {
+                if (b->chirps_left-- > 0) start_chirp(b);
+                else { b->active = 0; continue; }
+            }
+        }
+        if (b->chirping) {
+            double frac = b->t / b->dur;
+            if (frac > 1.0) frac = 1.0;
+            s += b->amp * (b->ed - b->ea) * sin(b->ph);
+            b->ph += TWO_PI * b->f * (1.0 + b->trill_m * sin(b->trill_ph)) / (double)RATE;
+            b->trill_ph += TWO_PI * b->trill_f / (double)RATE;
+            b->f = b->f0 * (1.0 + b->glide * frac);
+            b->ed *= b->dd; b->ea *= b->da;
+            b->t += 1.0;
+            if (b->t >= b->dur && b->ed < 5e-3) {
+                b->chirping = 0;
+                b->gap = (0.06 + frand() * 0.14) * (double)RATE;
+            }
+        }
+    }
+    double w = white_raw();
+    double hp = w - lp1_run(&ba_hp, w, lp_coef(400.0));
+    double amb = lp1_run(&ba_lp, hp, lp_coef(2500.0));
+    return s + P_BAMB * amb;
+}
+
 
 static lp1 surf_lp, rumble_lp1, rumble_lp2;
 
@@ -311,20 +478,21 @@ static void spectrum_update(int playing)
 #define WIN_W 640
 #define WIN_H 640
 
-static const char *names[6] = { "White", "Pink", "Brown", "Airplane", "Rain", "Sea" };
-static double (*gens[6])(void) = { white, pink, brown, deep, rain, sea };
-static const SDL_Color accents[6] = {
+static const char *names[9] = { "White", "Pink", "Brown", "Airplane", "Rain", "Sea", "Wind", "Stream", "Birds" };
+static double (*gens[9])(void) = { white, pink, brown, deep, rain, sea, snd_wind, snd_stream, snd_birds };
+static const SDL_Color accents[9] = {
     { 200, 200, 200, 255 }, { 235, 140, 180, 255 }, { 170, 120, 70, 255 },
     { 110, 100, 140, 255 }, { 110, 170, 230, 255 }, {  60, 130, 160, 255 },
+    { 127, 174, 107, 255 }, { 110, 200, 176, 255 }, { 230, 200, 110, 255 },
 };
 
-static SDL_Rect sound_btn(int i)  { return (SDL_Rect){ 20, 20 + i * 58, 150, 48 }; }
+static SDL_Rect sound_btn(int i)  { return (SDL_Rect){ 20, 20 + i * 44, 150, 36 }; }
 static SDL_Rect param_track(int j){ return (SDL_Rect){ 190, 52 + j * 66, 330, 8 }; }
 static SDL_Rect reset_btn(void)   { return (SDL_Rect){ 190, 320, 150, 32 }; }
-static SDL_Rect vol_track(void)   { return (SDL_Rect){ 20, 388, 300, 8 }; }
-static SDL_Rect play_btn(void)    { return (SDL_Rect){ 20, 416, 120, 44 }; }
-static SDL_Rect vu_rect(void)     { return (SDL_Rect){ 160, 430, 460, 16 }; }
-static SDL_Rect spec_rect(void)   { return (SDL_Rect){ 20, 476, 600, 140 }; }
+static SDL_Rect vol_track(void)   { return (SDL_Rect){ 20, 448, 300, 8 }; }
+static SDL_Rect play_btn(void)    { return (SDL_Rect){ 20, 474, 120, 40 }; }
+static SDL_Rect vu_rect(void)     { return (SDL_Rect){ 160, 486, 460, 16 }; }
+static SDL_Rect spec_rect(void)   { return (SDL_Rect){ 20, 522, 600, 106 }; }
 
 static int hit(SDL_Rect r, int x, int y)
 {
@@ -467,7 +635,7 @@ int main(void)
                     break;
                 }
                 default:
-                    if (ev.key.keysym.sym >= SDLK_1 && ev.key.keysym.sym <= SDLK_6) {
+                    if (ev.key.keysym.sym >= SDLK_1 && ev.key.keysym.sym <= SDLK_9) {
                         sel = ev.key.keysym.sym - SDLK_1;
                         SDL_LockAudioDevice(dev);
                         gen = gens[sel];
@@ -478,7 +646,7 @@ int main(void)
 
             case SDL_MOUSEBUTTONDOWN: {
                 int x = ev.button.x, y = ev.button.y;
-                for (int i = 0; i < 6; i++)
+                for (int i = 0; i < 9; i++)
                     if (hit(sound_btn(i), x, y)) {
                         sel = i;
                         SDL_LockAudioDevice(dev);
@@ -523,7 +691,7 @@ int main(void)
         SDL_SetRenderDrawColor(ren, 24, 26, 30, 255);
         SDL_RenderClear(ren);
 
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 9; i++) {
             SDL_Rect r = sound_btn(i);
             if (i == sel)
                 SDL_SetRenderDrawColor(ren, accents[i].r / 2, accents[i].g / 2,
@@ -533,7 +701,7 @@ int main(void)
             SDL_RenderFillRect(ren, &r);
             SDL_SetRenderDrawColor(ren, accents[i].r, accents[i].g, accents[i].b, 255);
             SDL_RenderDrawRect(ren, &r);
-            draw_text(ren, font, names[i], r.x + 16, r.y + 13,
+            draw_text(ren, font, names[i], r.x + 16, r.y + 8,
                       (SDL_Color){ 230, 230, 230, 255 });
         }
 
@@ -563,7 +731,7 @@ int main(void)
         SDL_RenderFillRect(ren, &pb);
         SDL_SetRenderDrawColor(ren, 150, 150, 160, 255);
         SDL_RenderDrawRect(ren, &pb);
-        draw_text(ren, font, playing ? "Pause" : "Play", pb.x + 34, pb.y + 11,
+        draw_text(ren, font, playing ? "Pause" : "Play", pb.x + 34, pb.y + 9,
                   (SDL_Color){ 230, 230, 230, 255 });
 
         double rms = SDL_AtomicGet(&rms_milli) / 1000.0;

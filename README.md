@@ -9,8 +9,8 @@ real-time players.
 | Program        | Sounds                          | Output      | Dependencies    |
 |----------------|---------------------------------|-------------|-----------------|
 | `noisegen`     | white, pink, brown, deep        | WAV file    | libm only       |
-| `soundscape`   | rain, sea                       | WAV file    | libm only       |
-| `noisemachine` | all six                         | real-time   | SDL2            |
+| `soundscape`   | rain, sea, wind, stream, birds  | WAV file    | libm only       |
+| `noisemachine` | all nine                        | real-time   | SDL2            |
 | `noisesdl`     | white, pink, brown              | real-time   | SDL2            |
 | `noiselive`    | white, pink, brown              | real-time   | ALSA (Linux)    |
 
@@ -171,6 +171,45 @@ as breaking surf. Underneath, a constant two-pole 120 Hz low-passed
 noise supplies the deep-water rumble. The process is cyclostationary
 with periods $T$ and $1.522\,T$; the irrational-looking ratio keeps
 successive waves from repeating exactly.
+
+### Wind: doubly co-modulated noise
+
+A gust envelope $g(t)$ — very-low-pass-filtered noise
+($f_c = 0.12$ Hz), depth-scaled and clipped to $[0.05, 1]$ — drives
+three things at once: the overall gain, the cutoff of a two-pole
+low-passed noise body, $f(t) = T_w (0.6 + 1.8\,g)$, and the level of a
+separate 2–6 kHz "leaf rustle" band weighted by $g^2$ — foliage is
+silent in still air and hisses disproportionately in gusts. A faster
+tremor ($f_c = 1.5$ Hz) multiplies the whole for flutter.
+
+### Stream: rising-chirp shot noise
+
+Structurally rain's twin — a Poisson process of enveloped voices —
+but the voices are *tonal*: damped sines whose frequency rises,
+
+$$v_k[n] = A_k \left(d_s^{\,n} - d_f^{\,n}\right) \sin\phi_k[n],
+\qquad f_k[n+1] = c_k\, f_k[n],\ c_k > 1,$$
+
+following the physics of bubble acoustics, where pitch rises as a
+bubble ascends. The chirp direction is the entire semantic: rising
+damped sines read as water, falling ones as birdsong. A band-passed
+(0.7–3 kHz) flow bed with fast ($f_c = 2$ Hz) level wobble supplies
+the continuous rush.
+
+### Birds: a two-level point process
+
+Song onsets form a Poisson process (rate $\lambda_{song}$); each song
+emits $K \in \{2,\dots,6\}$ chirps separated by 60–200 ms gaps. Each
+chirp is a damped sine with linear pitch glide and trill vibrato:
+
+$$f(t) = f_0 \left(1 + \gamma\, \tfrac{t}{D}\right)
+\left(1 + m \sin 2\pi f_t t\right),$$
+
+with glide $\gamma \sim \pm U(0.10, 0.35)$, trill depth
+$m \sim U(0, 0.1)$ at $f_t \sim U(20, 60)$ Hz, duration
+$D \sim U(40, 150)$ ms, under the same difference-of-exponentials
+envelope. This is precisely the synthesis the rain generator had to
+abandon — here deployed on purpose.
 
 ### Measured spectral slopes
 
