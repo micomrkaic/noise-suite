@@ -54,3 +54,11 @@ dkms.conf
 # debug information files
 *.dwo
 samples/
+
+# suite binaries (extensionless, so the generic rules above miss them)
+noisegen
+noisegui
+noiselive
+noisemachine
+noisesdl
+soundscape

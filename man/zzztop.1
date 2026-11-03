@@ -1,0 +1,147 @@
+.TH ZZZTOP 1 "November 2026" "noise-suite" "User Commands"
+.SH NAME
+zzztop, noisegui, noisemachine, noisegen, soundscape, noisesdl, noiselive
+\- ZzzTop, a sleep-sound synthesis suite ("sharp-dressed noise")
+.SH SYNOPSIS
+.B zzztop
+.br
+.B noisegui
+.br
+.B noisemachine
+.I sound
+.RI [ volume ]
+.br
+.B noisegen
+.BR white | pink | brown | deep
+.I seconds outfile.wav
+.br
+.B soundscape
+.BR rain | sea | wind | stream | birds
+.I seconds outfile.wav
+.br
+.B noisesdl
+.BR white | pink | brown
+.RI [ volume ]
+.br
+.B noiselive
+.BR white | pink | brown
+.RI [ volume ]
+.SH DESCRIPTION
+ZzzTop synthesizes nine sleep sounds in real time or to WAV files.
+All synthesis is procedural \(em no recorded samples \(em built from
+filtered noise, AR processes, and Poisson point processes.
+.PP
+.B zzztop
+(an alias for
+.BR noisegui )
+is the main program: an SDL2 window with sound selection, live
+per-sound tuning sliders, a master volume, a VU meter, and a real-time
+FFT spectrum analyzer.
+.B noisemachine
+plays any sound from the terminal with no GUI;
+.B noisegen
+and
+.B soundscape
+render WAV files;
+.B noisesdl
+and
+.B noiselive
+are minimal single-backend (SDL2 and ALSA) reference players.
+.PP
+A WebAssembly build of the same DSP core runs in any browser:
+.UR https://micomrkaic.github.io/noise-suite/
+.UE
+.SH SOUNDS
+.TP
+.B white
+Flat spectrum. Uniform random samples; optional low-pass tone control.
+.TP
+.B pink
+\-3 dB/octave (1/f). Kellet cascade: a parallel bank of six AR(1)
+sections whose staggered corners approximate the 1/f slope.
+.TP
+.B brown
+\-6 dB/octave (1/f\(S2). A single leaky AR(1) integrator;
+the leak sets the low-frequency corner.
+.TP
+.B deep
+\-12 dB/octave (1/f^4). Two AR(1) stages in cascade; nearly all
+energy below 100 Hz (use headphones). Shown as
+.I Airplane
+in the GUIs \(em the spectral shape of jet-cabin boundary-layer noise.
+.TP
+.B rain
+Poisson process of noise-burst "drops" (smooth difference-of-exponentials
+envelopes, low per-drop cutoffs) over a band-passed hiss bed with
+slowly wandering intensity.
+.TP
+.B sea
+White noise through a low-pass whose cutoff and gain both follow a
+slow two-swell envelope \(em crashes are louder and brighter together \(em
+over a 120 Hz rumble bed.
+.TP
+.B wind
+Gust envelope co-modulating gain, body brightness, and a 2\(en6 kHz
+leaf-rustle band.
+.TP
+.B stream
+Poisson bubbles: damped sines with rising pitch chirps (rising reads
+as water, falling as birdsong) over a fast-wobbling flow bed.
+.TP
+.B birds
+Two-level point process: Poisson song onsets, each a burst of 2\(en6
+chirps with random pitch glides and trill vibrato, over a faint field
+breeze.
+.SH KEYS (noisegui / zzztop)
+.TP
+.B 1\(en9
+Select sound.
+.TP
+.B space
+Play / pause.
+.TP
+.B up / down
+Master volume.
+.TP
+.B r
+Reset the selected sound's parameters to defaults.
+.TP
+.B Esc
+Quit.
+.PP
+The sliders in the right-hand panel tune the selected sound's
+synthesis parameters live; the panel's Reset button matches
+.BR r .
+.SH EXAMPLES
+.TP
+Play brown noise at volume 0.4 from the terminal:
+.B noisemachine brown 0.4
+.TP
+Render one hour of pink noise to a file:
+.B noisegen pink 3600 pink.wav
+.TP
+Ten minutes of rain:
+.B soundscape rain 600 rain.wav
+.SH EXIT STATUS
+0 on success, 1 on bad arguments or audio/initialization failure.
+.SH NOTES
+The CLI programs keep the historical keyword
+.B deep
+for the sound the GUIs label
+.IR Airplane .
+.PP
+Dependencies: the WAV generators need only libm;
+.B noisegui
+needs SDL2 and SDL2_ttf (and the DejaVu fonts);
+.B noisemachine
+and
+.B noisesdl
+need SDL2;
+.B noiselive
+needs ALSA.
+.SH SEE ALSO
+Source, mathematical documentation (README.md), and the web app:
+.UR https://github.com/micomrkaic/noise-suite
+.UE
+.SH AUTHOR
+Mico Mrkaic, with synthesis design assistance from Claude (Anthropic).

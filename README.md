@@ -19,10 +19,16 @@ are kept as minimal single-backend references.
 
 ## Build
 
-    sudo apt install libsdl2-dev libasound2-dev   # Debian/Ubuntu
+    sudo apt install libsdl2-dev libsdl2-ttf-dev libasound2-dev fonts-dejavu-core
     make            # builds everything
     make noisegen   # or any single target
     make samples    # regenerate 30 s demo WAVs into samples/
+    make install    # installs to ~/.local/bin (+ man page); zzztop = the GUI
+    make uninstall  # removes exactly what install put there
+
+`make install PREFIX=/usr/local` for a system-wide install (needs sudo).
+After install, `zzztop` launches the GUI and `man zzztop` documents
+everything.
 
 On macOS, `noisegen`, `soundscape`, and the SDL programs build as-is
 (SDL2 via Homebrew); skip `noiselive`.
