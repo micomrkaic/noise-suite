@@ -1,0 +1,30 @@
+# Rebuild the WebAssembly app whenever the DSP core or web sources change,
+# so the deployed Pages app can never silently diverge from the C.
+name: wasm
+on:
+  push:
+    branches: [main]
+    paths: ['dsp.c', 'dsp.h', 'web/**', '.github/workflows/wasm.yml']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install wasi-sdk
+        run: |
+          curl -sL -o /tmp/wasi.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz
+          tar xzf /tmp/wasi.tar.gz -C /opt
+      - name: Build wasm app
+        run: cd web && WASI_SDK=/opt/wasi-sdk-33.0-x86_64-linux sh build.sh
+      - name: Commit rebuilt app if it changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/noisemachine.html web/dsp.wasm
+          git diff --cached --quiet || {
+            git commit -m "CI: rebuild wasm app [skip ci]"
+            git push
+          }

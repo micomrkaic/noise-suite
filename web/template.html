@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#181a1e">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
 <title>ZzzTop</title>
 <style>
   :root { --bg:#181a1e; --panel:#2d3036; --edge:#43464e; --text:#e6e6e6; --dim:#aab; }
@@ -34,6 +37,11 @@
   canvas { width:100%; height:150px; background:#1e2026; border-radius:10px; display:block; }
   footer { font-size:11px; color:#667; margin-top:10px; text-align:center; }
 
+  .mix { display:flex; gap:10px; align-items:center; margin:12px 0; }
+  .mix select { background:var(--panel); color:var(--text); border:1px solid var(--edge);
+                border-radius:8px; padding:6px 8px; font-size:14px; }
+  .mix input[type=range] { flex:1; }
+  .mix .pct { font-size:13px; color:var(--dim); width:40px; text-align:right; }
   #scene { margin-bottom:12px; }
   #scene svg { width:100%; height:auto; display:block; }
 </style>
@@ -106,6 +114,21 @@
 <div id="params"></div>
 <button id="reset">Reset to defaults</button>
 
+<div class="mix">
+  <span style="font-size:13px;color:var(--dim)">Overlay</span>
+  <select id="ovsel"></select>
+  <input type="range" id="ovgain" min="0" max="100" value="50">
+  <span class="pct" id="ovpct">50%</span>
+</div>
+<div class="param">
+  <label><span>Sleep timer (fades to silence)</span><span id="timerval">off</span></label>
+  <input type="range" id="timer" min="0" max="120" step="5" value="0">
+</div>
+<div class="param">
+  <label><span>Volume</span><span id="volval">80%</span></label>
+  <input type="range" id="vol" min="0" max="1000" value="800">
+</div>
+
 <div class="row">
   <button id="play">Play</button>
   <div id="vuwrap"><div id="vu"></div></div>
@@ -113,7 +136,7 @@
 
 <canvas id="spec"></canvas>
 <div id="status" style="font-size:12px;color:#889;min-height:16px;margin-top:6px">JavaScript has not run. If you are seeing this on iPhone, you are probably in a file preview (Quick Look), which never runs scripts — open this page via a URL in Safari instead (e.g. GitHub Pages or a local http server).</div>
-<footer>ZzzTop &mdash; nine sounds from white noise to birdsong &mdash; C compiled to WebAssembly</footer>
+<footer>ZzzTop &mdash; ten sounds from white noise to crickets, in stereo &mdash; C compiled to WebAssembly</footer>
 
 <script>
 "use strict";
@@ -129,6 +152,7 @@ const SOUNDS = [
   { name:"Wind",  color:"#7fae6b", params:[12,13,14] },
   { name:"Stream",color:"#6ec8b0", params:[15,16,17,18] },
   { name:"Birds", color:"#e6c86e", params:[19,20,21] },
+  { name:"Crickets", color:"#a0b450", params:[22,23,24] },
 ];
 const PARAMS = [
   { name:"Low-pass tone (Hz)", lo:500,   hi:20000,  fmt:v=>v.toFixed(0) },
@@ -153,11 +177,86 @@ const PARAMS = [
   { name:"Songs per 10 s",     lo:0.5,   hi:10,     fmt:v=>v.toFixed(1) },
   { name:"Pitch (Hz)",         lo:1500,  hi:5000,   fmt:v=>v.toFixed(0) },
   { name:"Ambience",           lo:0,     hi:0.25,   fmt:v=>v.toFixed(2) },
+  { name:"Chirps per s",       lo:0.3,   hi:4,      fmt:v=>v.toFixed(1) },
+  { name:"Pitch (Hz)",         lo:3000,  hi:6000,   fmt:v=>v.toFixed(0) },
+  { name:"Ambience",           lo:0,     hi:0.25,   fmt:v=>v.toFixed(2) },
 ];
 
 const WASM_B64 = "__WASM_B64__";
 
-let dsp, defaults = [], sel = 2, volume = 0.7;
+let dsp, defaults = [], sel = 2, volume = 0.8;
+let ov = -1, ovg = 0.5;
+let timerMin = 0, timerDeadline = 0, timerTimeout = null;
+
+/* audio taper: the applied gain is the cube of the slider position,
+ * spreading sleep-level volumes across the whole travel */
+const gainVal = () => volume * volume * volume;
+
+function saveState() {
+  if (!dsp) return;
+  try {
+    const p = [];
+    for (let i = 0; i < dsp.dsp_num_params(); i++) p.push(dsp.dsp_get_param(i));
+    localStorage.setItem("zzztop", JSON.stringify({ p, sel, ov, ovg, vol: volume }));
+  } catch (e) {}
+}
+function loadState() {
+  try {
+    const s = JSON.parse(localStorage.getItem("zzztop") || "null");
+    if (!s) return;
+    if (Array.isArray(s.p)) s.p.forEach((v, i) => dsp.dsp_set_param(i, v));
+    if (s.sel >= 0 && s.sel < SOUNDS.length) sel = s.sel;
+    if (typeof s.ov === "number" && s.ov >= -1 && s.ov < SOUNDS.length) ov = s.ov;
+    if (typeof s.ovg === "number") ovg = Math.min(1, Math.max(0, s.ovg));
+    if (typeof s.vol === "number") volume = Math.min(1, Math.max(0, s.vol));
+  } catch (e) {}
+}
+
+function applyAudioGain() {
+  if (!gainNode) return;
+  const g = gainNode.gain, now = ctx.currentTime;
+  g.cancelScheduledValues(0);
+  if (playing && timerDeadline > Date.now() && timerMin > 0) {
+    const rem = (timerDeadline - Date.now()) / 1000;
+    const cur = gainVal() * rem / (timerMin * 60);
+    g.setValueAtTime(cur, now);
+    g.linearRampToValueAtTime(0, now + rem);
+  } else {
+    g.setValueAtTime(gainVal(), now);
+  }
+}
+
+function setTimerLabel() {
+  document.getElementById("timerval").textContent =
+    timerMin > 0 ? timerMin + " min" : "off";
+}
+
+function setTimer(min) {
+  timerMin = min;
+  clearTimeout(timerTimeout);
+  timerTimeout = null;
+  timerDeadline = 0;
+  if (min > 0 && playing) {
+    timerDeadline = Date.now() + min * 60 * 1000;
+    timerTimeout = setTimeout(() => {
+      pausePlayback();
+      timerDeadline = 0;
+      document.getElementById("timer").value = 0;
+      timerMin = 0;
+      setTimerLabel();
+    }, min * 60 * 1000);
+  }
+  setTimerLabel();
+  applyAudioGain();
+}
+
+function pausePlayback() {
+  if (ctx) ctx.suspend();
+  if (unlockEl) unlockEl.pause();
+  playing = false;
+  document.getElementById("play").textContent = "Play";
+  status("");
+}
 const status = msg => { document.getElementById("status").textContent = msg; };
 const fail = msg => {
   const s = document.getElementById("status");
@@ -198,7 +297,7 @@ function buildSounds() {
     const b = document.createElement("button");
     b.textContent = s.name;
     b.style.borderColor = s.color;
-    b.onclick = () => { sel = i; if (dsp) dsp.dsp_set_sound(i); refresh(); };
+    b.onclick = () => { sel = i; if (dsp) dsp.dsp_set_sound(i); refresh(); saveState(); };
     box.appendChild(b);
   });
 }
@@ -230,10 +329,8 @@ function buildParams() {
   if (dsp) SOUNDS[sel].params.forEach(pi => {
     const p = PARAMS[pi];
     mk(p.name, p.lo, p.hi, dsp.dsp_get_param(pi), p.fmt,
-       v => dsp.dsp_set_param(pi, v));
+       v => { dsp.dsp_set_param(pi, v); saveState(); });
   });
-  mk("Volume", 0, 1, volume, v => (v * 100).toFixed(0) + "%",
-     v => { volume = v; if (gainNode) gainNode.gain.value = v; });
 }
 
 function refresh() {
@@ -247,30 +344,75 @@ function refresh() {
 document.getElementById("reset").onclick = () => {
   SOUNDS[sel].params.forEach(pi => dsp.dsp_set_param(pi, defaults[pi]));
   buildParams();
+  saveState();
 };
+
+/* ---- fixed controls: overlay, timer, volume ---- */
+function buildMixer() {
+  const sl = document.getElementById("ovsel");
+  sl.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = -1; none.textContent = "none";
+  sl.appendChild(none);
+  SOUNDS.forEach((s, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = s.name;
+    sl.appendChild(o);
+  });
+  sl.value = ov;
+  sl.onchange = () => {
+    ov = parseInt(sl.value, 10);
+    if (dsp) dsp.dsp_set_overlay(ov);
+    saveState();
+  };
+  const og = document.getElementById("ovgain");
+  og.value = Math.round(ovg * 100);
+  document.getElementById("ovpct").textContent = og.value + "%";
+  og.oninput = () => {
+    ovg = og.value / 100;
+    document.getElementById("ovpct").textContent = og.value + "%";
+    if (dsp) dsp.dsp_set_overlay_gain(ovg);
+    saveState();
+  };
+  const tm = document.getElementById("timer");
+  tm.oninput = () => setTimer(parseInt(tm.value, 10));
+  const vs = document.getElementById("vol");
+  vs.value = Math.round(volume * 1000);
+  document.getElementById("volval").textContent = Math.round(volume * 100) + "%";
+  vs.oninput = () => {
+    volume = vs.value / 1000;
+    document.getElementById("volval").textContent = Math.round(volume * 100) + "%";
+    applyAudioGain();
+    saveState();
+  };
+}
 
 /* ---- audio ---- */
 function startAudio() {
   ctx = new (window.AudioContext || window.webkitAudioContext)();
   dsp.dsp_init(ctx.sampleRate);
   dsp.dsp_set_sound(sel);
+  dsp.dsp_set_overlay(ov);
+  dsp.dsp_set_overlay_gain(ovg);
   /* ScriptProcessorNode: deprecated but works everywhere including
    * plain-http and file:// contexts, unlike AudioWorklet. Fine here —
    * latency is irrelevant for a noise machine. */
-  node = ctx.createScriptProcessor(4096, 1, 1);
+  node = ctx.createScriptProcessor(4096, 0, 2);
   node.onaudioprocess = e => {
-    const out = e.outputBuffer.getChannelData(0);
-    dsp.dsp_render(out.length);
-    out.set(new Float32Array(dsp.memory.buffer, dsp.dsp_get_buf(), out.length));
+    const outL = e.outputBuffer.getChannelData(0);
+    const outR = e.outputBuffer.getChannelData(1);
+    dsp.dsp_render(outL.length);
+    outL.set(new Float32Array(dsp.memory.buffer, dsp.dsp_get_buf_l(), outL.length));
+    outR.set(new Float32Array(dsp.memory.buffer, dsp.dsp_get_buf_r(), outR.length));
     let sum = 0;
-    for (let i = 0; i < out.length; i += 16) sum += out[i] * out[i];
-    vuLevel = Math.sqrt(sum / (out.length / 16)) * volume;
+    for (let i = 0; i < outL.length; i += 16) sum += outL[i] * outL[i];
+    vuLevel = Math.sqrt(sum / (outL.length / 16)) * gainVal();
   };
   analyser = ctx.createAnalyser();
   analyser.fftSize = 4096;
   analyser.smoothingTimeConstant = 0.82;
   gainNode = ctx.createGain();
-  gainNode.gain.value = volume;
+  gainNode.gain.value = gainVal();
   node.connect(analyser);        /* analyser taps pre-volume: shape stays */
   analyser.connect(gainNode);    /* visible however quiet you set it     */
   gainNode.connect(ctx.destination);
@@ -281,10 +423,19 @@ document.getElementById("play").onclick = async () => {
     if (!dsp) { fail("synth not loaded yet"); return; }
     iosUnlock();                     /* must happen inside the tap gesture */
     if (!ctx) startAudio();
-    if (playing) { await ctx.suspend(); if (unlockEl) unlockEl.pause(); playing = false; }
-    else         { await ctx.resume();  if (unlockEl) unlockEl.play().catch(()=>{}); playing = true; }
-    document.getElementById("play").textContent = playing ? "Pause" : "Play";
-    status(playing ? "playing @ " + ctx.sampleRate + " Hz" : "");
+    if (playing) {
+      pausePlayback();
+      clearTimeout(timerTimeout); timerTimeout = null; timerDeadline = 0;
+    } else {
+      await ctx.resume();
+      if (unlockEl) unlockEl.play().catch(()=>{});
+      playing = true;
+      if (timerMin > 0) setTimer(timerMin);   /* restart countdown in full */
+      applyAudioGain();
+      document.getElementById("play").textContent = "Pause";
+      status("playing @ " + ctx.sampleRate + " Hz" +
+             (ov >= 0 ? " · " + SOUNDS[sel].name + " + " + SOUNDS[ov].name : ""));
+    }
   } catch (err) { fail(err.message || err); }
 };
 
@@ -332,9 +483,20 @@ function drawLoop() {
 }
 
 /* ---- boot: UI first, so failures are visible on-page ---- */
-status(""); buildSounds(); refresh(); drawLoop();
+status(""); buildSounds(); buildMixer(); refresh(); drawLoop();
 status("loading synth\u2026");
-loadWasm().then(() => refresh()).catch(e => fail("wasm: " + (e.message || e)));
+loadWasm().then(() => {
+  loadState();
+  dsp.dsp_set_sound(sel);
+  dsp.dsp_set_overlay(ov);
+  dsp.dsp_set_overlay_gain(ovg);
+  buildMixer();
+  refresh();
+}).catch(e => fail("wasm: " + (e.message || e)));
+
+/* offline app: cache the page + icons when served over https */
+if ("serviceWorker" in navigator && location.protocol === "https:")
+  navigator.serviceWorker.register("./sw.js").catch(() => {});
 </script>
 </body>
 </html>

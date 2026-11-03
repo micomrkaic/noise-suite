@@ -1,11 +1,14 @@
-/* noisegui.c — sleep-sound machine with per-sound tuning controls.
- * Left: pick a sound. Right: live sliders for that sound's synthesis
- * parameters. Bottom: master volume, play/pause, VU meter.
- * Keys: 1-9 select sound, space play/pause, up/down volume, r resets
- * the selected sound's parameters, Esc quits.
+/* noisegui.c — ZzzTop: sleep-sound machine with per-sound tuning, mixing,
+ * sleep timer, presets, and a live FFT spectrum. Stereo, via the shared
+ * DSP core (dsp.c).
  *
- * Build:  cc -O2 -o noisegui noisegui.c $(sdl2-config --cflags --libs) -lSDL2_ttf -lm
+ * Build:  cc -O2 -o noisegui noisegui.c dsp.c $(sdl2-config --cflags --libs) -lSDL2_ttf -lm
  *         (needs: sudo apt install libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core)
+ *
+ * Keys: 1-9,0 select sound · o cycle overlay · space play/pause ·
+ *       up/down volume · r reset sound params · s save preset · Esc quit.
+ * Preset file: $XDG_CONFIG_HOME/zzztop.conf (default ~/.config/zzztop.conf),
+ * loaded at startup, written by the Save button or the s key.
  */
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -13,392 +16,170 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include "dsp.h"
 
-#define RATE 44100
 #define TWO_PI 6.28318530717958647692
 
-/* ================= parameters =================
- * All slider-tunable values live in these tables. The UI thread writes
- * .val only inside SDL_LockAudioDevice(); the audio thread reads freely. */
+/* ================= sounds and parameter metadata ================= */
 
-typedef struct {
-    const char *name;
-    double lo, hi, val, def;
-    const char *fmt;              /* printf format for the value label */
-} param;
+#define NSOUNDS 10
 
-static param p_white[] = {
-    { "Low-pass tone (Hz)", 500, 20000, 20000, 20000, "%.0f" },
+static const char *names[NSOUNDS] = {
+    "White", "Pink", "Brown", "Airplane", "Rain",
+    "Sea", "Wind", "Stream", "Birds", "Crickets",
 };
-static param p_pink[] = {
-    { "Low-pass tone (Hz)", 500, 20000, 20000, 20000, "%.0f" },
+static const SDL_Color accents[NSOUNDS] = {
+    { 200, 200, 200, 255 }, { 235, 140, 180, 255 }, { 170, 120,  70, 255 },
+    { 110, 100, 140, 255 }, { 110, 170, 230, 255 }, {  60, 130, 160, 255 },
+    { 127, 174, 107, 255 }, { 110, 200, 176, 255 }, { 230, 200, 110, 255 },
+    { 160, 180,  80, 255 },
 };
-static param p_brown[] = {
-    { "Leak (tight <-> deep)", 0.9000, 0.995, 0.995, 0.995, "%.4f" },
+
+typedef struct { const char *name; int idx; double lo, hi, def; const char *fmt; } pmeta;
+
+static const pmeta P_WHITE[]  = { { "Low-pass tone (Hz)",  0, 500, 20000, 20000, "%.0f" } };
+static const pmeta P_PINK[]   = { { "Low-pass tone (Hz)",  1, 500, 20000, 20000, "%.0f" } };
+static const pmeta P_BROWN[]  = { { "Leak (tight <-> deep)", 2, 0.90, 0.995, 0.995, "%.4f" } };
+static const pmeta P_DEEP[]   = { { "2nd-stage leak",      3, 0.90, 0.9995, 0.997, "%.4f" } };
+static const pmeta P_RAIN[] = {
+    { "Drop density (/s)",   4, 5,   150,  60,   "%.0f" },
+    { "Drop tone (Hz)",      5, 150, 3000, 600,  "%.0f" },
+    { "Drop level",          6, 0,   3,    1.6,  "%.2f" },
+    { "Hiss level",          7, 0,   0.5,  0.15, "%.2f" },
 };
-static param p_deep[] = {
-    { "2nd-stage leak",      0.9000, 0.9995, 0.997, 0.997, "%.4f" },
+static const pmeta P_SEA[] = {
+    { "Wave period (s)",     8, 4,    20,   9.0,  "%.1f" },
+    { "Crash sharpness",     9, 1,    5,    3.0,  "%.1f" },
+    { "Surf brightness (Hz)",10, 1000, 8000, 5500, "%.0f" },
+    { "Rumble level",        11, 0,   5,    2.6,  "%.2f" },
 };
-static param p_rain[] = {
-    { "Drop density (/s)",   5,   150,   60,   60,  "%.0f" },
-    { "Drop tone (Hz)",      150, 3000,  600,  600,  "%.0f" },
-    { "Drop level",          0.0, 3.0,   1.6,  1.6,  "%.2f" },
-    { "Hiss level",          0.0, 0.5,   0.15, 0.15, "%.2f" },
+static const pmeta P_WIND[] = {
+    { "Gustiness",           12, 0,   1,    0.6,  "%.2f" },
+    { "Leaf rustle",         13, 0,   1.5,  0.6,  "%.2f" },
+    { "Body tone (Hz)",      14, 100, 700,  250,  "%.0f" },
 };
-static param p_wind[] = {
-    { "Gustiness",           0.0,  1.0,   0.6,  0.6,  "%.2f" },
-    { "Leaf rustle",         0.0,  1.5,   0.6,  0.6,  "%.2f" },
-    { "Body tone (Hz)",      100,  700,   250,  250,  "%.0f" },
+static const pmeta P_STREAM[] = {
+    { "Bubble rate (/s)",    15, 10,  150,  50,   "%.0f" },
+    { "Bubble pitch (Hz)",   16, 300, 2000, 900,  "%.0f" },
+    { "Bubble level",        17, 0,   2,    0.9,  "%.2f" },
+    { "Flow level",          18, 0,   0.4,  0.12, "%.2f" },
 };
-static param p_stream[] = {
-    { "Bubble rate (/s)",    10,   150,   50,   50,   "%.0f" },
-    { "Bubble pitch (Hz)",   300,  2000,  900,  900,  "%.0f" },
-    { "Bubble level",        0.0,  2.0,   0.9,  0.9,  "%.2f" },
-    { "Flow level",          0.0,  0.4,   0.12, 0.12, "%.2f" },
+static const pmeta P_BIRDS[] = {
+    { "Songs per 10 s",      19, 0.5, 10,   2.5,  "%.1f" },
+    { "Pitch (Hz)",          20, 1500,5000, 2800, "%.0f" },
+    { "Ambience",            21, 0,   0.25, 0.03, "%.2f" },
 };
-static param p_birds[] = {
-    { "Songs per 10 s",      0.5,  10,    2.5,  2.5,  "%.1f" },
-    { "Pitch (Hz)",          1500, 5000,  2800, 2800, "%.0f" },
-    { "Ambience",            0.0,  0.25,  0.03, 0.03, "%.2f" },
+static const pmeta P_CRICK[] = {
+    { "Chirps per s",        22, 0.3, 4,    1.2,  "%.1f" },
+    { "Pitch (Hz)",          23, 3000,6000, 4300, "%.0f" },
+    { "Ambience",            24, 0,   0.25, 0.02, "%.2f" },
 };
-static param p_sea[] = {
-    { "Wave period (s)",     4,    20,   9.0,  9.0,  "%.1f" },
-    { "Crash sharpness",     1.0,  5.0,  3.0,  3.0,  "%.1f" },
-    { "Surf brightness (Hz)",1000, 8000, 5500, 5500, "%.0f" },
-    { "Rumble level",        0.0,  5.0,  2.6,  2.6,  "%.2f" },
+
+static const pmeta *psets[NSOUNDS] = {
+    P_WHITE, P_PINK, P_BROWN, P_DEEP, P_RAIN,
+    P_SEA, P_WIND, P_STREAM, P_BIRDS, P_CRICK,
 };
-static param p_vol = { "Volume", 0.0, 1.0, 0.30, 0.30, "%.0f%%" };
+static const int pcounts[NSOUNDS] = { 1, 1, 1, 1, 4, 4, 3, 4, 3, 3 };
 
-static param *param_sets[9] = { p_white, p_pink, p_brown, p_deep, p_rain, p_sea, p_wind, p_stream, p_birds };
-static const int param_counts[9] = { 1, 1, 1, 1, 4, 4, 3, 4, 3 };
+/* ================= shared state (UI <-> audio thread) ================= */
 
-/* ================= synthesis ================= */
+/* Written by the UI only inside SDL_LockAudioDevice(dev); read by the
+ * callback. vol_slider is the knob position; the applied gain is its
+ * cube (an audio taper: sleep volumes live in the lower half of a
+ * linear slider's bottom, the cube spreads them across the travel). */
+static double vol_slider = 0.75;
+static double timer_total, timer_left;   /* in samples; 0 = off */
 
-static double frand(void) { return (double)rand() / ((double)RAND_MAX + 1.0); }
-static double white_raw(void) { return 2.0 * frand() - 1.0; }
-
-typedef struct { double y; } lp1;
-static double lp1_run(lp1 *f, double x, double a) { f->y += a * (x - f->y); return f->y; }
-static double lp_coef(double fc) { return 1.0 - exp(-TWO_PI * fc / RATE); }
-
-static lp1 tone_w, tone_p;
-
-static double white(void)
-{
-    return lp1_run(&tone_w, white_raw(), lp_coef(p_white[0].val));
-}
-
-static double pink(void)
-{
-    static double b0, b1, b2, b3, b4, b5, b6;
-    double w = white_raw();
-    b0 = 0.99886 * b0 + w * 0.0555179;
-    b1 = 0.99332 * b1 + w * 0.0750759;
-    b2 = 0.96900 * b2 + w * 0.1538520;
-    b3 = 0.86650 * b3 + w * 0.3104856;
-    b4 = 0.55000 * b4 + w * 0.5329522;
-    b5 = -0.7616 * b5 - w * 0.0168980;
-    double out = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362;
-    b6 = w * 0.115926;
-    return lp1_run(&tone_p, out * 0.11, lp_coef(p_pink[0].val));
-}
-
-static double brown(void)
-{
-    static double acc;
-    double L = p_brown[0].val;
-    acc = L * acc + 0.02 * white_raw();
-    /* loudness compensation: keep RMS constant as the leak changes */
-    double comp = sqrt((1.0 - 0.997 * 0.997) / (1.0 - L * L));
-    return acc * 3.5 * comp;
-}
-
-/* Deep (1/f^4, sometimes called "black" noise): brown noise fed through
- * a second AR(1) integrator — a two-pole cascade, -12 dB/octave. The
- * closed-form variance of the cascade normalizes loudness for any leak. */
-static double deep(void)
-{
-    static double a1, a2;
-    double p1 = 0.997, p2 = p_deep[0].val;
-    a1 = p1 * a1 + white_raw();
-    a2 = p2 * a2 + a1;
-    double var = (1.0 + p1 * p2) /
-                 ((1.0 - p1 * p2) * (1.0 - p1 * p1) * (1.0 - p2 * p2)) / 3.0;
-    return a2 / sqrt(var) * 0.5;
-}
-
-#define MAX_DROPS 64
-
-/* Drop = burst of low-passed noise with a smooth 1-3 ms attack
- * (difference of two exponentials). Instant attacks sound like static
- * crackle; tonal (sine) drops with pitch glides sound like birds. */
-typedef struct { double ed, dd, ea, da, coef, amp; lp1 f; int alive; } drop;
-
-static drop drops[MAX_DROPS];
-static lp1 hiss_hp, bed_lp, bed_lp2, wob_lp;
-
-static void spawn_drop(void)
-{
-    for (int i = 0; i < MAX_DROPS; i++)
-        if (!drops[i].alive) {
-            drop *d = &drops[i];
-            d->alive = 1;
-            d->f.y   = 0.0;
-            double dec_ms = 8.0 + frand() * 22.0;
-            double atk_ms = 1.0 + frand() * 2.0;
-            d->dd  = exp(-1.0 / (dec_ms * 0.001 * RATE));
-            d->da  = exp(-1.0 / (atk_ms * 0.001 * RATE));
-            d->ed  = 1.0;
-            d->ea  = 1.0;
-            /* tone T: cutoff drawn in [T/2, 2.5T] — default T=600 gives
-             * the 300-1500 Hz "pat" range; slide up for tin-roof ticks */
-            double T = p_rain[1].val;
-            d->coef = lp_coef(T * 0.5 + frand() * T * 2.0);
-            d->amp  = 0.20 + frand() * frand() * 0.60;
-            return;
-        }
-}
-
-static double rain(void)
-{
-    if (frand() < p_rain[0].val / RATE) spawn_drop();
-
-    double s = 0.0;
-    for (int i = 0; i < MAX_DROPS; i++) {
-        drop *d = &drops[i];
-        if (!d->alive) continue;
-        double env = d->ed - d->ea;
-        s += d->amp * env * lp1_run(&d->f, white_raw(), d->coef);
-        d->ed *= d->dd;
-        d->ea *= d->da;
-        if (d->ed < 1e-4) d->alive = 0;
-    }
-
-    double w = white_raw();
-    double hp  = w - lp1_run(&hiss_hp, w, lp_coef(400.0));
-    double bed = lp1_run(&bed_lp2,
-                         lp1_run(&bed_lp, hp, lp_coef(4000.0)),
-                         lp_coef(4000.0));
-    double wob = 1.0 + 80.0 * lp1_run(&wob_lp, white_raw(), lp_coef(0.3));
-    if (wob < 0.5) wob = 0.5;
-    if (wob > 1.5) wob = 1.5;
-    return p_rain[2].val * s + p_rain[3].val * bed * wob;
-}
-
-#define P_WGUST  p_wind[0].val
-#define P_WRUST  p_wind[1].val
-#define P_WTONE  p_wind[2].val
-#define P_SRATE  p_stream[0].val
-#define P_SPITCH p_stream[1].val
-#define P_SBLVL  p_stream[2].val
-#define P_SFLOW  p_stream[3].val
-#define P_BRATE  p_birds[0].val
-#define P_BPITCH p_birds[1].val
-#define P_BAMB   p_birds[2].val
-/* ---- wind in the forest ---- */
-static lp1 wg_lp, wf_lp, wb_lp1, wb_lp2, wr_hp, wr_lp;
-
-static double snd_wind(void)
-{
-    /* gust: very slow filtered noise scales gain AND brightness */
-    double g = 0.5 + 400.0 * P_WGUST * lp1_run(&wg_lp, white_raw(), lp_coef(0.12));
-    if (g < 0.05) g = 0.05;
-    if (g > 1.0)  g = 1.0;
-    double fl = 1.0 + 30.0 * lp1_run(&wf_lp, white_raw(), lp_coef(1.5));   /* flutter */
-    if (fl < 0.7) fl = 0.7;
-    if (fl > 1.3) fl = 1.3;
-    double fc = P_WTONE * (0.6 + 1.8 * g);
-    double body = lp1_run(&wb_lp2, lp1_run(&wb_lp1, white_raw(), lp_coef(fc)), lp_coef(fc));
-    double w = white_raw();
-    double hp = w - lp1_run(&wr_hp, w, lp_coef(2000.0));
-    double rust = lp1_run(&wr_lp, hp, lp_coef(6000.0));   /* leaf band 2-6 kHz */
-    return (2.6 * body * (0.15 + 0.85 * g) + 0.55 * P_WRUST * g * g * rust) * fl;
-}
-
-/* ---- stream: bubbles are damped sines with an UPWARD chirp
- * (downward chirps read as birdsong; rising pitch reads as water) ---- */
-#define MAX_BUBBLES 24
-typedef struct { double ph, f, c, ed, dd, ea, da, amp; int alive; } bubble;
-static bubble bubbles[MAX_BUBBLES];
-static lp1 st_hp, st_lp, st_wob;
-
-static void spawn_bubble(void)
-{
-    for (int i = 0; i < MAX_BUBBLES; i++)
-        if (!bubbles[i].alive) {
-            bubble *b = &bubbles[i];
-            b->alive = 1;
-            b->ph = 0.0;
-            b->f  = P_SPITCH * (0.6 + 1.2 * frand());
-            b->c  = 1.0 + (0.3 + frand()) * 0.00045;
-            double dec_ms = 10.0 + frand() * 30.0, atk_ms = 1.0 + frand() * 2.0;
-            b->dd = exp(-1.0 / (dec_ms * 0.001 * (double)RATE));
-            b->da = exp(-1.0 / (atk_ms * 0.001 * (double)RATE));
-            b->ed = 1.0; b->ea = 1.0;
-            b->amp = 0.05 + frand() * frand() * 0.25;
-            return;
-        }
-}
-
-static double snd_stream(void)
-{
-    if (frand() < P_SRATE / (double)RATE) spawn_bubble();
-    double s = 0.0;
-    for (int i = 0; i < MAX_BUBBLES; i++) {
-        bubble *b = &bubbles[i];
-        if (!b->alive) continue;
-        s += b->amp * (b->ed - b->ea) * sin(b->ph);
-        b->ph += TWO_PI * b->f / (double)RATE;
-        b->f *= b->c;
-        b->ed *= b->dd; b->ea *= b->da;
-        if (b->ed < 1e-4) b->alive = 0;
-    }
-    double w = white_raw();
-    double hp = w - lp1_run(&st_hp, w, lp_coef(700.0));
-    double bed = lp1_run(&st_lp, hp, lp_coef(3000.0));
-    double wob = 1.0 + 40.0 * lp1_run(&st_wob, white_raw(), lp_coef(2.0));
-    if (wob < 0.6) wob = 0.6;
-    if (wob > 1.4) wob = 1.4;
-    return P_SBLVL * s + P_SFLOW * bed * wob;
-}
-
-/* ---- birds: Poisson songs, each a burst of gliding, trilling chirps ---- */
-#define MAX_BIRDS 3
-typedef struct {
-    int active, chirping, chirps_left;
-    double gap, ph, f0, f, glide, trill_m, trill_f, trill_ph;
-    double ed, dd, ea, da, amp, dur, t;
-} birdv;
-static birdv birds_v[MAX_BIRDS];
-static lp1 ba_hp, ba_lp;
-
-static void start_chirp(birdv *b)
-{
-    b->chirping = 1;
-    b->t = 0.0;
-    b->ph = 0.0;
-    b->f0 = P_BPITCH * (0.8 + 0.5 * frand());
-    b->f  = b->f0;
-    b->glide = (frand() < 0.5 ? 1.0 : -1.0) * (0.10 + 0.25 * frand());
-    b->trill_m = frand() * 0.10;
-    b->trill_f = 20.0 + frand() * 40.0;
-    b->trill_ph = 0.0;
-    b->dur = (0.04 + frand() * 0.11) * (double)RATE;
-    double atk_ms = 3.0 + frand() * 6.0, dec_ms = 30.0 + frand() * 90.0;
-    b->dd = exp(-1.0 / (dec_ms * 0.001 * (double)RATE));
-    b->da = exp(-1.0 / (atk_ms * 0.001 * (double)RATE));
-    b->ed = 1.0; b->ea = 1.0;
-    b->amp = 0.10 + frand() * 0.20;
-}
-
-static double snd_birds(void)
-{
-    if (frand() < (P_BRATE / 10.0) / (double)RATE) {
-        for (int i = 0; i < MAX_BIRDS; i++)
-            if (!birds_v[i].active) {
-                birds_v[i].active = 1;
-                birds_v[i].chirps_left = 2 + (int)(frand() * 5.0);
-                birds_v[i].gap = 0.0;
-                birds_v[i].chirping = 0;
-                break;
-            }
-    }
-    double s = 0.0;
-    for (int i = 0; i < MAX_BIRDS; i++) {
-        birdv *b = &birds_v[i];
-        if (!b->active) continue;
-        if (!b->chirping) {
-            b->gap -= 1.0;
-            if (b->gap <= 0.0) {
-                if (b->chirps_left-- > 0) start_chirp(b);
-                else { b->active = 0; continue; }
-            }
-        }
-        if (b->chirping) {
-            double frac = b->t / b->dur;
-            if (frac > 1.0) frac = 1.0;
-            s += b->amp * (b->ed - b->ea) * sin(b->ph);
-            b->ph += TWO_PI * b->f * (1.0 + b->trill_m * sin(b->trill_ph)) / (double)RATE;
-            b->trill_ph += TWO_PI * b->trill_f / (double)RATE;
-            b->f = b->f0 * (1.0 + b->glide * frac);
-            b->ed *= b->dd; b->ea *= b->da;
-            b->t += 1.0;
-            if (b->t >= b->dur && b->ed < 5e-3) {
-                b->chirping = 0;
-                b->gap = (0.06 + frand() * 0.14) * (double)RATE;
-            }
-        }
-    }
-    double w = white_raw();
-    double hp = w - lp1_run(&ba_hp, w, lp_coef(400.0));
-    double amb = lp1_run(&ba_lp, hp, lp_coef(2500.0));
-    return s + P_BAMB * amb;
-}
-
-
-static lp1 surf_lp, rumble_lp1, rumble_lp2;
-
-static double sea(void)
-{
-    static double t;
-    t += 1.0 / RATE;
-
-    double T = p_sea[0].val;
-    double e = 0.5 + 0.30 * sin(TWO_PI * t / T)
-                   + 0.20 * sin(TWO_PI * t / (1.522 * T) + 1.0);
-    if (e < 0.0) e = 0.0;
-    if (e > 1.0) e = 1.0;
-    double crash = pow(e, p_sea[1].val);
-
-    double fc = 250.0 + p_sea[2].val * crash;
-    double surf = lp1_run(&surf_lp, white_raw(), lp_coef(fc)) * (0.15 + 0.85 * crash);
-
-    double r = lp1_run(&rumble_lp2,
-                       lp1_run(&rumble_lp1, white_raw(), lp_coef(120.0)),
-                       lp_coef(120.0));
-    return surf + p_sea[3].val * r;
-}
-
-/* ================= audio plumbing ================= */
-
-static double (*gen)(void) = brown;
 static SDL_atomic_t rms_milli;
+static SDL_atomic_t timer_expired;
 
-/* Spectrum tap: the callback writes raw generator output (pre-volume,
- * so the display doesn't shrink with the volume slider) into a ring;
- * the UI copies and FFTs it each frame. Reads may catch a torn frame,
- * which is harmless for a display and avoids locking in the callback. */
+/* spectrum tap: pre-volume mono mix of the core's output */
 #define FFT_N 4096
 static double spec_ring[FFT_N];
 static SDL_atomic_t spec_widx;
 
-static void audio_cb(void *userdata, Uint8 *stream, int len)
+static void audio_cb(void *ud, Uint8 *stream, int len)
 {
-    (void)userdata;
+    (void)ud;
     Sint16 *out = (Sint16 *)stream;
-    int n = len / (int)sizeof(Sint16);
-    double sumsq = 0.0;
+    int frames = len / (2 * (int)sizeof(Sint16));
     static int wpos;
-    for (int i = 0; i < n; i++) {
-        double g = gen();
-        spec_ring[wpos++ & (FFT_N - 1)] = g;
-        double s = g * p_vol.val;
-        if (s > 1.0) s = 1.0;
-        if (s < -1.0) s = -1.0;
-        sumsq += s * s;
-        out[i] = (Sint16)lrint(s * 32767.0);
+    double g = vol_slider * vol_slider * vol_slider;
+    double sumsq = 0.0;
+
+    while (frames > 0) {
+        int k = frames > 4096 ? 4096 : frames;
+        dsp_render(k);
+        const float *L = dsp_get_buf_l(), *R = dsp_get_buf_r();
+        for (int i = 0; i < k; i++) {
+            double fade = 1.0;
+            if (timer_total > 0.0) {
+                fade = timer_left / timer_total;
+                if (fade < 0.0) fade = 0.0;
+                timer_left -= 1.0;
+                if (timer_left <= 0.0) {
+                    timer_total = 0.0;
+                    SDL_AtomicSet(&timer_expired, 1);
+                }
+            }
+            double m = 0.5 * (L[i] + R[i]);
+            spec_ring[wpos++ & (FFT_N - 1)] = m;
+            double l = L[i] * g * fade, r = R[i] * g * fade;
+            sumsq += 0.5 * (l * l + r * r);
+            out[2 * i]     = (Sint16)lrint(l * 32767.0);
+            out[2 * i + 1] = (Sint16)lrint(r * 32767.0);
+        }
+        out += 2 * k;
+        frames -= k;
     }
     SDL_AtomicSet(&spec_widx, wpos);
-    SDL_AtomicSet(&rms_milli, (int)(sqrt(sumsq / n) * 1000.0));
+    SDL_AtomicSet(&rms_milli, (int)(sqrt(sumsq * 2.0 * sizeof(Sint16) / len) * 1000.0));
+}
+
+/* ================= preset file ================= */
+
+static void conf_path(char *buf, size_t n)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg) snprintf(buf, n, "%s/zzztop.conf", xdg);
+    else snprintf(buf, n, "%s/.config/zzztop.conf", getenv("HOME") ? getenv("HOME") : ".");
+}
+
+static void preset_save(int sel, int ovl, double ovgain)
+{
+    char p[512];
+    conf_path(p, sizeof p);
+    FILE *f = fopen(p, "w");
+    if (!f) return;
+    fprintf(f, "# ZzzTop preset (written by noisegui)\n");
+    fprintf(f, "sel %d\noverlay %d\novgain %.4f\nvol %.4f\n", sel, ovl, ovgain, vol_slider);
+    for (int i = 0; i < dsp_num_params(); i++)
+        fprintf(f, "p%d %.6g\n", i, dsp_get_param(i));
+    fclose(f);
+}
+
+static void preset_load(int *sel, int *ovl, double *ovgain)
+{
+    char p[512], key[32];
+    double val;
+    conf_path(p, sizeof p);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    while (fscanf(f, "%31s %lf", key, &val) == 2) {
+        if (strcmp(key, "sel") == 0 && val >= 0 && val < NSOUNDS) *sel = (int)val;
+        else if (strcmp(key, "overlay") == 0 && val >= -1 && val < NSOUNDS) *ovl = (int)val;
+        else if (strcmp(key, "ovgain") == 0) *ovgain = val;
+        else if (strcmp(key, "vol") == 0 && val >= 0 && val <= 1) vol_slider = val;
+        else if (key[0] == 'p') dsp_set_param(atoi(key + 1), val);
+    }
+    fclose(f);
 }
 
 /* ================= spectrum analysis (UI thread) ================= */
 
-/* In-place iterative radix-2 FFT. */
 static void fft(double *re, double *im, int n)
 {
-    for (int i = 1, j = 0; i < n; i++) {          /* bit-reversal permute */
+    for (int i = 1, j = 0; i < n; i++) {
         int bit = n >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
         j ^= bit;
@@ -416,7 +197,7 @@ static void fft(double *re, double *im, int n)
                 double ur = re[i + j], ui = im[i + j];
                 double vr = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci;
                 double vi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
-                re[i + j] = ur + vr;         im[i + j] = ui + vi;
+                re[i + j] = ur + vr;           im[i + j] = ui + vi;
                 re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
                 double ncr = cr * wr - ci * wi;
                 ci = cr * wi + ci * wr;
@@ -432,9 +213,9 @@ static void fft(double *re, double *im, int n)
 #define SPEC_DB_LO -70.0
 #define SPEC_DB_HI -15.0
 
-static double spec_bars[NBARS];   /* smoothed 0..1 heights */
+static double spec_bars[NBARS];
 
-static void spectrum_update(int playing)
+static void spectrum_update(int playing, int rate)
 {
     static double hann[FFT_N];
     static int init;
@@ -455,44 +236,38 @@ static void spectrum_update(int playing)
     for (int b = 0; b < NBARS; b++) {
         double f0 = SPEC_F_LO * pow(SPEC_F_HI / SPEC_F_LO, (double)b / NBARS);
         double f1 = SPEC_F_LO * pow(SPEC_F_HI / SPEC_F_LO, (double)(b + 1) / NBARS);
-        int k0 = (int)(f0 * FFT_N / RATE), k1 = (int)(f1 * FFT_N / RATE);
+        int k0 = (int)(f0 * FFT_N / rate), k1 = (int)(f1 * FFT_N / rate);
         if (k1 <= k0) k1 = k0 + 1;
         double peak = 0.0;
         for (int k = k0; k < k1 && k < FFT_N / 2; k++) {
             double m2 = re[k] * re[k] + im[k] * im[k];
             if (m2 > peak) peak = m2;
         }
-        /* full-scale sine == 0 dB with mag/(N/4) normalization */
         double db = 10.0 * log10(peak + 1e-18) - 20.0 * log10(FFT_N / 4.0);
         double h = (db - SPEC_DB_LO) / (SPEC_DB_HI - SPEC_DB_LO);
         if (h < 0.0) h = 0.0;
         if (h > 1.0) h = 1.0;
         if (!playing) h = 0.0;
-        /* fast attack, slow decay: peaks pop, then fall smoothly */
         spec_bars[b] = (h > spec_bars[b]) ? h : spec_bars[b] * 0.90;
     }
 }
 
-/* ================= GUI ================= */
+/* ================= tiny widget layer ================= */
 
 #define WIN_W 640
-#define WIN_H 640
+#define WIN_H 770
 
-static const char *names[9] = { "White", "Pink", "Brown", "Airplane", "Rain", "Sea", "Wind", "Stream", "Birds" };
-static double (*gens[9])(void) = { white, pink, brown, deep, rain, sea, snd_wind, snd_stream, snd_birds };
-static const SDL_Color accents[9] = {
-    { 200, 200, 200, 255 }, { 235, 140, 180, 255 }, { 170, 120, 70, 255 },
-    { 110, 100, 140, 255 }, { 110, 170, 230, 255 }, {  60, 130, 160, 255 },
-    { 127, 174, 107, 255 }, { 110, 200, 176, 255 }, { 230, 200, 110, 255 },
-};
-
-static SDL_Rect sound_btn(int i)  { return (SDL_Rect){ 20, 20 + i * 44, 150, 36 }; }
-static SDL_Rect param_track(int j){ return (SDL_Rect){ 190, 52 + j * 66, 330, 8 }; }
-static SDL_Rect reset_btn(void)   { return (SDL_Rect){ 190, 320, 150, 32 }; }
-static SDL_Rect vol_track(void)   { return (SDL_Rect){ 20, 448, 300, 8 }; }
-static SDL_Rect play_btn(void)    { return (SDL_Rect){ 20, 474, 120, 40 }; }
-static SDL_Rect vu_rect(void)     { return (SDL_Rect){ 160, 486, 460, 16 }; }
-static SDL_Rect spec_rect(void)   { return (SDL_Rect){ 20, 522, 600, 106 }; }
+static SDL_Rect sound_btn(int i)   { return (SDL_Rect){ 20, 20 + i * 40, 150, 32 }; }
+static SDL_Rect param_track(int j) { return (SDL_Rect){ 190, 52 + j * 58, 330, 8 }; }
+static SDL_Rect reset_btn(void)    { return (SDL_Rect){ 190, 288, 150, 28 }; }
+static SDL_Rect ovl_btn(void)      { return (SDL_Rect){ 190, 356, 130, 28 }; }
+static SDL_Rect ovl_track(void)    { return (SDL_Rect){ 350, 366, 170, 8 }; }
+static SDL_Rect timer_track(void)  { return (SDL_Rect){ 190, 428, 330, 8 }; }
+static SDL_Rect vol_track(void)    { return (SDL_Rect){ 20, 490, 290, 8 }; }
+static SDL_Rect save_btn(void)     { return (SDL_Rect){ 400, 478, 130, 30 }; }
+static SDL_Rect play_btn(void)     { return (SDL_Rect){ 20, 524, 120, 40 }; }
+static SDL_Rect vu_rect(void)      { return (SDL_Rect){ 160, 536, 460, 16 }; }
+static SDL_Rect spec_rect(void)    { return (SDL_Rect){ 20, 580, 600, 170 }; }
 
 static int hit(SDL_Rect r, int x, int y)
 {
@@ -525,10 +300,10 @@ static TTF_Font *load_font(int pt)
     return NULL;
 }
 
-static void slider_draw(SDL_Renderer *ren, TTF_Font *font, SDL_Rect tr,
-                        const param *p, SDL_Color accent)
+static void track_draw(SDL_Renderer *ren, SDL_Rect tr, double frac, SDL_Color accent)
 {
-    double frac = (p->val - p->lo) / (p->hi - p->lo);
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
     SDL_SetRenderDrawColor(ren, 60, 64, 72, 255);
     SDL_RenderFillRect(ren, &tr);
     SDL_Rect fill = tr; fill.w = (int)(tr.w * frac);
@@ -537,23 +312,23 @@ static void slider_draw(SDL_Renderer *ren, TTF_Font *font, SDL_Rect tr,
     SDL_Rect knob = { tr.x + (int)(tr.w * frac) - 5, tr.y - 7, 10, 22 };
     SDL_SetRenderDrawColor(ren, 220, 220, 220, 255);
     SDL_RenderFillRect(ren, &knob);
-
-    char buf[64];
-    if (strcmp(p->fmt, "%.0f%%") == 0)
-        snprintf(buf, sizeof buf, "%.0f%%", p->val * 100.0);
-    else
-        snprintf(buf, sizeof buf, p->fmt, p->val);
-    draw_text(ren, font, buf, tr.x + tr.w + 10, tr.y - 6,
-              (SDL_Color){ 200, 200, 200, 255 });
 }
 
-static void slider_set_from_x(param *p, SDL_Rect tr, int mx)
+static double track_frac(SDL_Rect tr, int mx)
 {
     double v = (double)(mx - tr.x) / tr.w;
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
-    p->val = p->lo + v * (p->hi - p->lo);
+    return v;
 }
+
+static int track_grabbed(SDL_Rect tr, int x, int y)
+{
+    SDL_Rect g = { tr.x - 8, tr.y - 12, tr.w + 16, tr.h + 24 };
+    return hit(g, x, y);
+}
+
+/* ================= main ================= */
 
 int main(void)
 {
@@ -589,24 +364,33 @@ int main(void)
 
     SDL_AudioSpec want, have;
     SDL_zero(want);
-    want.freq = RATE; want.format = AUDIO_S16SYS;
-    want.channels = 1; want.samples = 4096; want.callback = audio_cb;
+    want.freq = 44100; want.format = AUDIO_S16SYS;
+    want.channels = 2; want.samples = 4096; want.callback = audio_cb;
     SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (dev == 0) {
         fprintf(stderr, "SDL_OpenAudioDevice: %s\n", SDL_GetError());
         return 1;
     }
+    int rate = have.freq > 0 ? have.freq : 44100;
 
-    srand((unsigned)time(NULL));
+    int sel = 2, ovl = -1, playing = 1;
+    double ovgain = 0.5, timer_min = 0.0;
 
-    int sel = 2, playing = 1;   /* brown */
-    int drag = -1;   /* -1 none, 0..n-1 param slider j, 100 = volume */
+    dsp_init(rate);
+    preset_load(&sel, &ovl, &ovgain);
+    dsp_set_sound(sel);
+    dsp_set_overlay(ovl);
+    dsp_set_overlay_gain(ovgain);
+
     SDL_PauseAudioDevice(dev, 0);
 
+    /* drag targets: 0..3 param sliders, 100 volume, 101 overlay gain,
+     * 102 timer, -1 none */
+    int drag = -1;
     int run = 1;
     while (run) {
-        param *ps = param_sets[sel];
-        int np = param_counts[sel];
+        const pmeta *ps = psets[sel];
+        int np = pcounts[sel];
 
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -622,35 +406,51 @@ int main(void)
                     break;
                 case SDLK_r:
                     SDL_LockAudioDevice(dev);
-                    for (int j = 0; j < np; j++) ps[j].val = ps[j].def;
+                    for (int j = 0; j < np; j++) dsp_set_param(ps[j].idx, ps[j].def);
+                    SDL_UnlockAudioDevice(dev);
+                    break;
+                case SDLK_s:
+                    preset_save(sel, ovl, ovgain);
+                    break;
+                case SDLK_o:
+                    ovl = (ovl + 2 <= NSOUNDS) ? ovl + 1 : -1;
+                    if (ovl == sel) ovl = (ovl + 1 < NSOUNDS) ? ovl + 1 : -1;
+                    SDL_LockAudioDevice(dev);
+                    dsp_set_overlay(ovl);
                     SDL_UnlockAudioDevice(dev);
                     break;
                 case SDLK_UP: case SDLK_DOWN: {
                     double d = (ev.key.keysym.sym == SDLK_UP) ? 0.05 : -0.05;
                     SDL_LockAudioDevice(dev);
-                    p_vol.val += d;
-                    if (p_vol.val < 0.0) p_vol.val = 0.0;
-                    if (p_vol.val > 1.0) p_vol.val = 1.0;
+                    vol_slider += d;
+                    if (vol_slider < 0.0) vol_slider = 0.0;
+                    if (vol_slider > 1.0) vol_slider = 1.0;
                     SDL_UnlockAudioDevice(dev);
                     break;
                 }
-                default:
-                    if (ev.key.keysym.sym >= SDLK_1 && ev.key.keysym.sym <= SDLK_9) {
-                        sel = ev.key.keysym.sym - SDLK_1;
+                default: {
+                    int k = -1;
+                    if (ev.key.keysym.sym >= SDLK_1 && ev.key.keysym.sym <= SDLK_9)
+                        k = ev.key.keysym.sym - SDLK_1;
+                    else if (ev.key.keysym.sym == SDLK_0)
+                        k = 9;
+                    if (k >= 0 && k < NSOUNDS) {
+                        sel = k;
                         SDL_LockAudioDevice(dev);
-                        gen = gens[sel];
+                        dsp_set_sound(sel);
                         SDL_UnlockAudioDevice(dev);
                     }
+                }
                 }
                 break;
 
             case SDL_MOUSEBUTTONDOWN: {
                 int x = ev.button.x, y = ev.button.y;
-                for (int i = 0; i < 9; i++)
+                for (int i = 0; i < NSOUNDS; i++)
                     if (hit(sound_btn(i), x, y)) {
                         sel = i;
                         SDL_LockAudioDevice(dev);
-                        gen = gens[i];
+                        dsp_set_sound(sel);
                         SDL_UnlockAudioDevice(dev);
                     }
                 if (hit(play_btn(), x, y)) {
@@ -659,26 +459,43 @@ int main(void)
                 }
                 if (hit(reset_btn(), x, y)) {
                     SDL_LockAudioDevice(dev);
-                    for (int j = 0; j < np; j++) ps[j].val = ps[j].def;
+                    for (int j = 0; j < np; j++) dsp_set_param(ps[j].idx, ps[j].def);
                     SDL_UnlockAudioDevice(dev);
                 }
-                for (int j = 0; j < np; j++) {
-                    SDL_Rect tr = param_track(j);
-                    SDL_Rect grab = { tr.x - 8, tr.y - 12, tr.w + 16, tr.h + 24 };
-                    if (hit(grab, x, y)) drag = j;
+                if (hit(save_btn(), x, y))
+                    preset_save(sel, ovl, ovgain);
+                if (hit(ovl_btn(), x, y)) {
+                    ovl = (ovl + 2 <= NSOUNDS) ? ovl + 1 : -1;
+                    if (ovl == sel) ovl = (ovl + 1 < NSOUNDS) ? ovl + 1 : -1;
+                    SDL_LockAudioDevice(dev);
+                    dsp_set_overlay(ovl);
+                    SDL_UnlockAudioDevice(dev);
                 }
-                SDL_Rect vt = vol_track();
-                SDL_Rect vg = { vt.x - 8, vt.y - 12, vt.w + 16, vt.h + 24 };
-                if (hit(vg, x, y)) drag = 100;
+                for (int j = 0; j < np; j++)
+                    if (track_grabbed(param_track(j), x, y)) drag = j;
+                if (track_grabbed(vol_track(), x, y))   drag = 100;
+                if (track_grabbed(ovl_track(), x, y))   drag = 101;
+                if (track_grabbed(timer_track(), x, y)) drag = 102;
             } /* FALLTHROUGH */
             case SDL_MOUSEMOTION:
                 if (drag >= 0) {
                     int mx = (ev.type == SDL_MOUSEMOTION) ? ev.motion.x : ev.button.x;
                     SDL_LockAudioDevice(dev);
                     if (drag == 100)
-                        slider_set_from_x(&p_vol, vol_track(), mx);
-                    else if (drag < np)
-                        slider_set_from_x(&ps[drag], param_track(drag), mx);
+                        vol_slider = track_frac(vol_track(), mx);
+                    else if (drag == 101) {
+                        ovgain = track_frac(ovl_track(), mx);
+                        dsp_set_overlay_gain(ovgain);
+                    } else if (drag == 102) {
+                        timer_min = 120.0 * track_frac(timer_track(), mx);
+                        timer_min = 5.0 * floor(timer_min / 5.0 + 0.5);
+                        timer_total = timer_left = timer_min * 60.0 * rate;
+                        if (timer_min <= 0.0) timer_total = timer_left = 0.0;
+                    } else if (drag < np) {
+                        const pmeta *p = &ps[drag];
+                        dsp_set_param(p->idx,
+                            p->lo + track_frac(param_track(drag), mx) * (p->hi - p->lo));
+                    }
                     SDL_UnlockAudioDevice(dev);
                 }
                 break;
@@ -687,11 +504,18 @@ int main(void)
             }
         }
 
+        if (SDL_AtomicGet(&timer_expired)) {
+            SDL_AtomicSet(&timer_expired, 0);
+            playing = 0;
+            timer_min = 0.0;
+            SDL_PauseAudioDevice(dev, 1);
+        }
+
         /* ---------- draw ---------- */
         SDL_SetRenderDrawColor(ren, 24, 26, 30, 255);
         SDL_RenderClear(ren);
 
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < NSOUNDS; i++) {
             SDL_Rect r = sound_btn(i);
             if (i == sel)
                 SDL_SetRenderDrawColor(ren, accents[i].r / 2, accents[i].g / 2,
@@ -701,31 +525,81 @@ int main(void)
             SDL_RenderFillRect(ren, &r);
             SDL_SetRenderDrawColor(ren, accents[i].r, accents[i].g, accents[i].b, 255);
             SDL_RenderDrawRect(ren, &r);
-            draw_text(ren, font, names[i], r.x + 16, r.y + 8,
+            draw_text(ren, font, names[i], r.x + 14, r.y + 6,
                       (SDL_Color){ 230, 230, 230, 255 });
         }
 
-        /* parameter panel for the selected sound */
+        /* parameter panel */
+        char buf[64];
         for (int j = 0; j < np; j++) {
+            const pmeta *p = &ps[j];
             SDL_Rect tr = param_track(j);
-            draw_text(ren, small, ps[j].name, tr.x, tr.y - 22,
+            double val = dsp_get_param(p->idx);
+            draw_text(ren, small, p->name, tr.x, tr.y - 22,
                       (SDL_Color){ 170, 175, 185, 255 });
-            slider_draw(ren, font, tr, &ps[j], accents[sel]);
+            track_draw(ren, tr, (val - p->lo) / (p->hi - p->lo), accents[sel]);
+            snprintf(buf, sizeof buf, p->fmt, val);
+            draw_text(ren, font, buf, tr.x + tr.w + 10, tr.y - 6,
+                      (SDL_Color){ 200, 200, 200, 255 });
         }
         SDL_Rect rb = reset_btn();
         SDL_SetRenderDrawColor(ren, 45, 48, 54, 255);
         SDL_RenderFillRect(ren, &rb);
         SDL_SetRenderDrawColor(ren, 150, 150, 160, 255);
         SDL_RenderDrawRect(ren, &rb);
-        draw_text(ren, small, "Reset to defaults (r)", rb.x + 14, rb.y + 8,
+        draw_text(ren, small, "Reset to defaults (r)", rb.x + 14, rb.y + 6,
                   (SDL_Color){ 210, 210, 210, 255 });
 
-        /* master volume + play + VU */
+        /* overlay mixer */
+        draw_text(ren, small, "Overlay sound (o)  +  level", 190, 334,
+                  (SDL_Color){ 170, 175, 185, 255 });
+        SDL_Rect ob = ovl_btn();
+        SDL_SetRenderDrawColor(ren, 45, 48, 54, 255);
+        SDL_RenderFillRect(ren, &ob);
+        if (ovl >= 0)
+            SDL_SetRenderDrawColor(ren, accents[ovl].r, accents[ovl].g, accents[ovl].b, 255);
+        else
+            SDL_SetRenderDrawColor(ren, 100, 104, 112, 255);
+        SDL_RenderDrawRect(ren, &ob);
+        draw_text(ren, font, ovl >= 0 ? names[ovl] : "none", ob.x + 14, ob.y + 4,
+                  (SDL_Color){ 230, 230, 230, 255 });
+        track_draw(ren, ovl_track(), ovgain,
+                   ovl >= 0 ? accents[ovl] : (SDL_Color){ 100, 104, 112, 255 });
+        snprintf(buf, sizeof buf, "%.0f%%", ovgain * 100.0);
+        draw_text(ren, font, buf, ovl_track().x + ovl_track().w + 10,
+                  ovl_track().y - 6, (SDL_Color){ 200, 200, 200, 255 });
+
+        /* sleep timer */
+        draw_text(ren, small, "Sleep timer (fades to silence; 0 = off)", 190, 406,
+                  (SDL_Color){ 170, 175, 185, 255 });
+        track_draw(ren, timer_track(), timer_min / 120.0,
+                   (SDL_Color){ 180, 140, 200, 255 });
+        if (timer_total > 0.0) {
+            double left_min = timer_left / (60.0 * rate);
+            snprintf(buf, sizeof buf, "%.0f min", left_min + 0.5);
+        } else
+            snprintf(buf, sizeof buf, timer_min > 0 ? "%.0f min" : "off", timer_min);
+        draw_text(ren, font, buf, timer_track().x + timer_track().w + 10,
+                  timer_track().y - 6, (SDL_Color){ 200, 200, 200, 255 });
+
+        /* volume (cube taper) */
         draw_text(ren, small, "Volume", vol_track().x, vol_track().y - 22,
                   (SDL_Color){ 170, 175, 185, 255 });
-        slider_draw(ren, font, vol_track(), &p_vol,
-                    (SDL_Color){ 120, 180, 120, 255 });
+        track_draw(ren, vol_track(), vol_slider, (SDL_Color){ 120, 180, 120, 255 });
+        snprintf(buf, sizeof buf, "%.0f%%", vol_slider * 100.0);
+        draw_text(ren, font, buf, vol_track().x + vol_track().w + 10,
+                  vol_track().y - 6, (SDL_Color){ 200, 200, 200, 255 });
 
+        /* save preset */
+        SDL_Rect sb = save_btn();
+        SDL_SetRenderDrawColor(ren, 45, 48, 54, 255);
+        SDL_RenderFillRect(ren, &sb);
+        SDL_SetRenderDrawColor(ren, 150, 150, 160, 255);
+        SDL_RenderDrawRect(ren, &sb);
+        draw_text(ren, small, "Save preset (s)", sb.x + 16, sb.y + 7,
+                  (SDL_Color){ 210, 210, 210, 255 });
+
+        /* play / pause + VU */
         SDL_Rect pb = play_btn();
         SDL_SetRenderDrawColor(ren, 45, 48, 54, 255);
         SDL_RenderFillRect(ren, &pb);
@@ -747,12 +621,11 @@ int main(void)
         SDL_SetRenderDrawColor(ren, accents[sel].r, accents[sel].g, accents[sel].b, 255);
         SDL_RenderFillRect(ren, &vf);
 
-        /* live spectrum */
-        spectrum_update(playing);
+        /* spectrum */
+        spectrum_update(playing, rate);
         SDL_Rect sp = spec_rect();
         SDL_SetRenderDrawColor(ren, 30, 32, 38, 255);
         SDL_RenderFillRect(ren, &sp);
-        /* octave gridlines at 100 Hz, 1 kHz, 10 kHz */
         const double marks[3] = { 100.0, 1000.0, 10000.0 };
         const char *mlab[3] = { "100", "1k", "10k" };
         for (int m = 0; m < 3; m++) {

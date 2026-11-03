@@ -1,21 +1,39 @@
 # noise-suite (ZzzTop)
 
-ZzzTop: sleep-sound synthesis in plain C: colored noise (white / pink / brown)
-and procedural soundscapes (rain / sea), as both WAV generators and
-real-time players.
+ZzzTop: sleep-sound synthesis in plain C — ten sounds, in stereo, with
+two-sound mixing. Colored noise (white / pink / brown / airplane) and
+procedural soundscapes (rain / sea / wind / stream / birds / crickets),
+as WAV generators, real-time players, a parametric GUI, and a
+WebAssembly phone app. All synthesis lives in one shared core
+(`dsp.c`), which every target — native and wasm — compiles from, so
+the sounds cannot diverge between platforms.
 
 ## Programs
 
 | Program        | Sounds                          | Output      | Dependencies    |
 |----------------|---------------------------------|-------------|-----------------|
-| `noisegen`     | white, pink, brown, deep        | WAV file    | libm only       |
-| `soundscape`   | rain, sea, wind, stream, birds  | WAV file    | libm only       |
-| `noisemachine` | all nine                        | real-time   | SDL2            |
+| `noisegen`     | all ten                         | stereo WAV  | libm only       |
+| `soundscape`   | all ten (same program)          | stereo WAV  | libm only       |
+| `noisemachine` | all ten, mixable                | real-time   | SDL2            |
+| `noisegui`     | all ten, mixable (the GUI)      | real-time   | SDL2 + ttf      |
 | `noisesdl`     | white, pink, brown              | real-time   | SDL2            |
 | `noiselive`    | white, pink, brown              | real-time   | ALSA (Linux)    |
 
-`noisemachine` is the one to use day-to-day; `noisesdl` and `noiselive`
-are kept as minimal single-backend references.
+Everything is stereo: each sound runs two decorrelated generator
+instances, one per ear (deterministic envelopes such as the sea swell
+stay synchronized across channels). Any two sounds can be mixed —
+`noisemachine rain+airplane:0.6 0.4` at the terminal, or the overlay
+selector in the GUIs. The WAV writers take a trailing `loop` argument
+that equal-power crossfades the last second into the first, so the
+file loops seamlessly in any player. The GUI has a sleep timer that
+fades to silence over the chosen duration, an audio-taper volume
+(gain = slider³), and presets: Save writes everything to
+`~/.config/zzztop.conf`, loaded automatically at startup. The web app
+keeps its settings in the browser and installs as an offline PWA.
+
+`noisegui` (installed as `zzztop`) is the one to use day-to-day;
+`noisesdl` and `noiselive` are kept as minimal, self-contained
+single-backend references predating the shared core.
 
 ## Build
 
@@ -40,10 +58,17 @@ On macOS, `noisegen`, `soundscape`, and the SDL programs build as-is
     ./noisegen pink 3600 pink.wav   # one hour of pink noise to a file
     ./soundscape rain 600 rain.wav  # ten minutes of rain
 
+## Continuous integration
+
+`.github/workflows/wasm.yml` rebuilds `web/noisemachine.html` from the
+shared core on every push that touches `dsp.c`, `dsp.h`, or `web/`, and
+commits the result, so the deployed Pages app cannot silently go stale
+relative to the C.
+
 ## Web / phone version (web/)
 
-`web/dsp.c` is the DSP core alone (own PRNG, runtime sample rate, no
-libc beyond libm) compiled to a zero-import WebAssembly module, with
+The shared core `dsp.c` (own PRNG, runtime sample rate, no libc
+beyond libm) compiles to a zero-import WebAssembly module, with
 the UI as plain HTML/JS: native touch sliders, Web Audio output, and
 the browser's AnalyserNode for the live spectrum. `web/build.sh`
 (needs wasi-sdk) produces `noisemachine.html` — a single
@@ -216,6 +241,25 @@ $m \sim U(0, 0.1)$ at $f_t \sim U(20, 60)$ Hz, duration
 $D \sim U(40, 150)$ ms, under the same difference-of-exponentials
 envelope. This is precisely the synthesis the rain generator had to
 abandon — here deployed on purpose.
+
+### Crickets: a quasi-periodic point process
+
+Chirp-group onsets are Poisson; each group is $K \in \{2,\dots,4\}$
+syllables of $\sim$25 ms separated by $\sim$30 ms gaps — the familiar
+"chirp\dots chirp" — where each syllable is a narrowband damped sine
+around 4.3 kHz (crickets are nearly tonal), under the same
+difference-of-exponentials envelope as everything else. A faint 1–6 kHz
+band of night-air hiss sits underneath.
+
+### Stereo
+
+Each channel is an independent instance of the full generator state
+with its own PRNG stream, so left and right are statistically identical
+but uncorrelated (measured $|\rho| < 0.05$) — the diffuse-field image of
+being *in* the rain rather than listening to a point source. The sea's
+swell envelope is deterministic in time, so its crashes remain
+synchronized across ears (envelope correlation $\approx 1$) while the
+noise within them decorrelates — matching a real shoreline.
 
 ### Measured spectral slopes
 

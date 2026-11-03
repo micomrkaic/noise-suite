@@ -12,22 +12,22 @@ ALL = noisegen soundscape noisemachine noisegui noisesdl noiselive
 all: $(ALL)
 
 # ---- no dependencies beyond libm ----
-noisegen: noisegen.c
-	$(CC) $(CFLAGS) -o $@ $< -lm
+noisegen: noisegen.c dsp.c dsp.h
+	$(CC) $(CFLAGS) -o $@ noisegen.c dsp.c -lm
 
-soundscape: soundscape.c
-	$(CC) $(CFLAGS) -o $@ $< -lm
+soundscape: soundscape.c noisegen.c dsp.c dsp.h
+	$(CC) $(CFLAGS) -o $@ soundscape.c dsp.c -lm
 
 # ---- needs libsdl2-dev ----
-noisemachine: noisemachine.c
-	$(CC) $(CFLAGS) -o $@ $< $(SDLFLAGS) -lm
+noisemachine: noisemachine.c dsp.c dsp.h
+	$(CC) $(CFLAGS) -o $@ noisemachine.c dsp.c $(SDLFLAGS) -lm
 
 noisesdl: noisesdl.c
 	$(CC) $(CFLAGS) -o $@ $< $(SDLFLAGS) -lm
 
 # ---- needs libsdl2-dev + libsdl2-ttf-dev ----
-noisegui: noisegui.c
-	$(CC) $(CFLAGS) -o $@ $< $(SDLFLAGS) -lSDL2_ttf -lm
+noisegui: noisegui.c dsp.c dsp.h
+	$(CC) $(CFLAGS) -o $@ noisegui.c dsp.c $(SDLFLAGS) -lSDL2_ttf -lm
 
 # ---- needs libasound2-dev (Linux only) ----
 noiselive: noiselive.c
@@ -44,6 +44,7 @@ samples: noisegen soundscape
 	./soundscape wind 30 samples/wind.wav
 	./soundscape stream 30 samples/stream.wav
 	./soundscape birds 30 samples/birds.wav
+	./soundscape crickets 30 samples/crickets.wav
 
 install: all
 	install -d $(BINDIR) $(MANDIR)

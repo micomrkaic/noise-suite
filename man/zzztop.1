@@ -8,16 +8,16 @@ zzztop, noisegui, noisemachine, noisegen, soundscape, noisesdl, noiselive
 .B noisegui
 .br
 .B noisemachine
-.I sound
+.IR sound [ +overlay [ :gain ]]
 .RI [ volume ]
 .br
 .B noisegen
-.BR white | pink | brown | deep
-.I seconds outfile.wav
+.I sound seconds outfile.wav
+.RB [ loop ]
 .br
 .B soundscape
-.BR rain | sea | wind | stream | birds
-.I seconds outfile.wav
+.I sound seconds outfile.wav
+.RB [ loop ]
 .br
 .B noisesdl
 .BR white | pink | brown
@@ -27,22 +27,41 @@ zzztop, noisegui, noisemachine, noisegen, soundscape, noisesdl, noiselive
 .BR white | pink | brown
 .RI [ volume ]
 .SH DESCRIPTION
-ZzzTop synthesizes nine sleep sounds in real time or to WAV files.
-All synthesis is procedural \(em no recorded samples \(em built from
-filtered noise, AR processes, and Poisson point processes.
+ZzzTop synthesizes ten sleep sounds in real time or to WAV files, in
+stereo: every sound runs two decorrelated generator instances, one per
+ear, for a wide diffuse image (the sea's crashes stay synchronized
+across channels). Any two sounds can be mixed \(em a primary plus an
+overlay at its own level. All synthesis is procedural \(em no recorded
+samples \(em built from filtered noise, AR processes, and Poisson point
+processes.
 .PP
 .B zzztop
 (an alias for
 .BR noisegui )
 is the main program: an SDL2 window with sound selection, live
-per-sound tuning sliders, a master volume, a VU meter, and a real-time
-FFT spectrum analyzer.
+per-sound tuning sliders, an overlay mixer for playing two sounds at
+once, a sleep timer that fades to silence and then pauses, a master
+volume (audio-taper: the applied gain is the cube of the slider
+position), a VU meter, and a real-time FFT spectrum analyzer. Settings
+are saved with the Save button (or
+.BR s )
+to
+.I $XDG_CONFIG_HOME/zzztop.conf
+(default
+.IR ~/.config/zzztop.conf )
+and loaded automatically at startup.
 .B noisemachine
-plays any sound from the terminal with no GUI;
+plays any sound \(em or a mix, e.g.
+.B noisemachine rain+airplane:0.6 0.4
+\(em from the terminal with no GUI;
 .B noisegen
 and
 .B soundscape
-render WAV files;
+(two names for the same program) render stereo WAV files of any sound;
+with the trailing
+.B loop
+argument the last second is equal-power crossfaded into the first so
+the file loops seamlessly in any player;
 .B noisesdl
 and
 .B noiselive
@@ -92,10 +111,17 @@ as water, falling as birdsong) over a fast-wobbling flow bed.
 Two-level point process: Poisson song onsets, each a burst of 2\(en6
 chirps with random pitch glides and trill vibrato, over a faint field
 breeze.
+.TP
+.B crickets
+A night field: Poisson chirp groups of 2\(en4 short (\(ti25 ms)
+narrowband syllables around 4.3 kHz, over faint night-air hiss.
 .SH KEYS (noisegui / zzztop)
 .TP
-.B 1\(en9
-Select sound.
+.B 1\(en9, 0
+Select sound (0 = crickets).
+.TP
+.B o
+Cycle the overlay sound (none, then each sound in turn).
 .TP
 .B space
 Play / pause.
@@ -105,6 +131,9 @@ Master volume.
 .TP
 .B r
 Reset the selected sound's parameters to defaults.
+.TP
+.B s
+Save the current preset (sounds, mix, volume, all parameters).
 .TP
 .B Esc
 Quit.
@@ -122,13 +151,22 @@ Render one hour of pink noise to a file:
 .TP
 Ten minutes of rain:
 .B soundscape rain 600 rain.wav
+.TP
+A seamlessly looping minute of stream, for a player set to repeat:
+.B soundscape stream 60 stream.wav loop
+.TP
+Rain over airplane rumble at the terminal:
+.B noisemachine rain+airplane:0.6 0.4
 .SH EXIT STATUS
 0 on success, 1 on bad arguments or audio/initialization failure.
 .SH NOTES
-The CLI programs keep the historical keyword
+The CLI programs accept both
 .B deep
-for the sound the GUIs label
-.IR Airplane .
+(the historical keyword) and
+.B airplane
+for the \-12 dB/octave noise. WAV output is 16-bit stereo at 44.1 kHz.
+The web app installs as an offline PWA (add to home screen) and keeps
+its settings in the browser.
 .PP
 Dependencies: the WAV generators need only libm;
 .B noisegui

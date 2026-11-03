@@ -1,0 +1,14 @@
+{
+  "name": "ZzzTop — sharp-dressed noise",
+  "short_name": "ZzzTop",
+  "description": "Ten synthesized sleep sounds, from white noise to crickets, in stereo.",
+  "start_url": "./noisemachine.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#181a1e",
+  "theme_color": "#181a1e",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
